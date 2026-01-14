@@ -1,0 +1,3190 @@
+---
+title: "analysisMain"
+author: "Ern Wong"
+date: "2025-07-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Packages and Data
+
+```{r datapackages}
+rm(list=ls())
+
+options(mc.cores = parallel::detectCores())
+
+packages <- c('plyr', 'dplyr','tidyverse',  "ggplot2", 'pander', 'emmeans','sjPlot', 'lmerTest', 'data.table',
+              'ggbeeswarm', 'lmerTest',  'brms', 'BayesFactor', "gridExtra", "lsr",'ggridges','cowplot','entropy','zoo','Hmisc','jsonlite', 
+              'DescTools', 'magrittr', 'purrr', 'forcats', 'modelr', 'tidybayes', 'rstan' , 'loo', 'R.matlab','ggpubr','gridExtra','patchwork',
+              'ggpubr','ggeffects','psych','viridis','abind','ppcor','CCA','afex','emmeans','sjPlot','scales',"rstatix","MuMIn","performance",
+              'GGally','ggExtra')
+
+invisible(lapply(packages, require, character.only = TRUE))
+
+```
+
+## Helper Functions
+
+Plots for Histograms and Partial Correlations
+
+plot_correlation()
+plot_histograms()
+
+```{r helperfunctions, echo=FALSE}
+plot_correlation <- function(df, x, y, control_vars = NULL, bins = NULL,
+                             method = "pearson",
+                             point_color = "#0A9396", line_color = "#005F73",
+                             title = NULL) {
+
+  # Check variable existence
+  stopifnot(x %in% names(df), y %in% names(df))
+  if (!is.null(control_vars)) stopifnot(all(control_vars %in% names(df)))
+  
+  if (!is.null(control_vars) && length(control_vars) > 0) {
+    # Partial correlation
+    numeric_controls <- df %>% dplyr::select(all_of(control_vars)) %>% dplyr::select(where(is.numeric))
+    
+    formula_x <- reformulate(control_vars, x)
+    formula_y <- reformulate(control_vars, y)
+    
+    lm_x <- lm(formula_x, data = df)
+    lm_y <- lm(formula_y, data = df)
+    
+    residuals_x <- scale(resid(lm_x))
+    residuals_y <- scale(resid(lm_y))
+    
+    pcor_result <- pcor.test(df[[x]], df[[y]], numeric_controls, method = method)
+    
+    rho <- round(pcor_result$estimate, 3)
+    pval <- round(pcor_result$p.value, 3)
+    d <- (2 * rho) / sqrt(1 - rho^2)
+    
+    plot_df <- data.frame(resid_x = residuals_x, resid_y = residuals_y)
+    plot <- ggplot(plot_df, aes(x = resid_x, y = resid_y)) +
+      geom_point(size = 3, color = point_color, alpha = 0.7) +
+      geom_smooth(method = "lm", se = TRUE, color = line_color, fill = line_color, alpha = 0.2) +
+      theme_minimal(base_size = 14) +
+      labs(
+        title = title %||% paste("Partial Correlation:", paste(control_vars, collapse = ", ")),
+        subtitle = paste("ρ =", rho, "| p =", pval, "| d =", round(d, 3)),
+        x = paste("Residuals of", x),
+        y = paste("Residuals of", y)
+      )
+  } else {
+    # Standard correlation
+    x_vec <- df[[x]]
+    y_vec <- df[[y]]
+    cor_test <- cor.test(x_vec, y_vec, method = method)
+    
+    rho <- round(cor_test$estimate, 3)
+    pval <- round(cor_test$p.value, 3)
+    d <- (2 * rho) / sqrt(1 - rho^2)
+    
+    plot_df <- data.frame(x = x_vec, y = y_vec)
+    
+    if (is.null(bins)){
+      
+      plot <- ggplot(plot_df, aes(x = x, y = y)) +
+        geom_point(size = 2, color = point_color, alpha = 0.45) +
+        geom_smooth(method = "lm", se = TRUE, color = line_color, fill = line_color, alpha = 0.2) +
+        theme_minimal(base_size = 12) +
+        labs(
+          title = title %||% "Correlation Plot",
+          #subtitle = paste("r =", rho, "| p =", pval, "| d =", round(d, 3)),
+          subtitle = paste("r =", rho, "| p =", pval),
+          x = x,
+          y = y
+        )
+    }
+    
+    else {
+      plot_df <- data.frame(x = x_vec, y = y_vec)
+      
+      # make percentile bins
+      probs <- seq(0, 1, length.out = bins + 1)
+      brks  <- quantile(plot_df$x, probs = probs, na.rm = TRUE)
+      
+      plot_df$bin <- cut(
+        plot_df$x,
+        breaks = brks,
+        include.lowest = TRUE,
+        labels = FALSE
+      )
+      
+      binned_df <- plot_df %>%
+        group_by(bin) %>%
+        summarise(
+          x_mean = mean(x, na.rm = TRUE),
+          y_mean = mean(y, na.rm = TRUE),
+          n      = sum(!is.na(y)),
+          sd_y   = ifelse(n > 1, sd(y, na.rm = TRUE), NA_real_),
+          se     = ifelse(n > 1, sd_y / sqrt(n), NA_real_),
+          ymin   = y_mean - 1.96 * se,
+          ymax   = y_mean + 1.96 * se,
+          .groups = "drop"
+        )
+      
+      #print(binned_df)
+      #print(plot_df)
+      # --- plot: points = bin means, error bars = uncertainty ---
+      plot <- ggplot() +
+        # correlation line from raw data
+        geom_smooth(
+          data = plot_df,
+          aes(x = x, y = y),
+          method = "lm",
+          se = TRUE,
+          color = line_color,
+          fill = line_color,
+          alpha = 0.2,
+          inherit.aes = FALSE
+        ) +
+        # binned means
+        geom_point(
+          data = binned_df,
+          aes(x = x_mean, y = y_mean),
+          size = 3,
+          color = point_color
+        ) +
+        # error bars for bins
+        geom_errorbar(
+          data = binned_df,
+          aes(x = x_mean, ymin = ymin, ymax = ymax),
+          width = 0.2,
+          color = point_color
+        ) +
+        theme_minimal(base_size = 12) +
+        labs(
+          title = title %||% "Correlation Plot (binned)",
+          subtitle = paste("r =", rho, "| p =", pval),
+          x = x,
+          y = y
+        )
+    }
+    
+    plot <- plot +
+      theme_classic(base_size = 12) +
+      theme(
+        plot.title = element_text(size = 12),
+        plot.subtitle = element_text(size = 10),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        axis.text = element_text(size = 12),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()
+      )
+    
+    # Optional print
+    cat(
+      if (!is.null(control_vars)) "Partial" else "Raw", "correlation:\n",
+      "  Estimate:", rho, "\n",
+      "  P-value:", pval, "\n",
+      "  Effect size (d):", round(d, 3), "\n"
+    )
+    
+    return(plot)
+  }
+}
+
+
+# Function to plot histograms for selected columns
+plot_histograms <- function(df, columns, bins = 30, fill_color = "#0A9396", density_color = "#BB3E03", title_prefix = "Distribution of") {
+  # Reshape the data to long format for easier plotting
+  df_long <- df %>%
+    dplyr::select(all_of(columns)) %>%
+    pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+  # Create the plot
+  plot <- ggplot(df_long, aes(x = Value)) +
+    geom_histogram(aes(y = ..density..), bins = bins, fill = fill_color, color = "black", alpha = 0.7) +  # Histogram
+    geom_density(color = density_color, size = 1) +  # Density curve overlay
+    facet_wrap(~ Variable, scales = "free", ncol = 2) +  # Facet by variable
+    labs(
+      title = paste(title_prefix),
+      x = "Value",
+      y = "Density"
+    ) +
+    theme_classic(base_size = 12) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 12),
+      axis.title.x = element_text(size = 12),
+      axis.title.y = element_text(size = 12),
+      axis.text = element_text(size = 12),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      #strip.text = element_text(size = 12)
+      strip.text = element_blank()
+    )
+  
+  return(plot)
+}
+```
+
+## Open DataFrames and filter based on criteria. Here we have the assumption that rewards are well learnt by phase 1, and thus particpants must perform above chance
+This block reads in the raw structured data, filter based on our exclusion criteria and do basic plots of demographics
+```{r create_df}
+df.choice_RAW <- readRDS("data/choiceDataRaw.rds")
+df.pTable_RAW <- readRDS("data/choiceFrequencyByPhaseRaw.rds")
+df.questionnaire_RAW <- readRDS("data/questionnaireScoresRaw.RDS")
+
+p1.pTable_RAW <- df.pTable_RAW %>% dplyr::filter(phase == 1L)
+
+# Quick plots
+#plot(p1.pTable_RAW$propBest_HvLv, df.questionnaire_RAW$SSS)
+
+# NA-safe indices for "bad" rows in PHASE 1
+badID_meanPerf   <- which(!is.na(p1.pTable_RAW$meanPerf)       & p1.pTable_RAW$meanPerf       <= 0.50)
+badID_rewardBias <- which(!is.na(p1.pTable_RAW$meanHighChoice) & p1.pTable_RAW$meanHighChoice <= 0.50)
+badID_hlvl       <- which(!is.na(p1.pTable_RAW$propBest_HvLv)  & p1.pTable_RAW$propBest_HvLv  <= 0.50)
+
+# Get IDs (combine all three criteria)
+badIDs <- unique(
+  p1.pTable_RAW$id[badID_meanPerf]
+)
+
+# Exclude those IDs everywhere
+df.choice        <- df.choice_RAW        %>% dplyr::anti_join(tibble::tibble(id = badIDs), by = "id")
+df.pTable        <- df.pTable_RAW        %>% dplyr::anti_join(tibble::tibble(id = badIDs), by = "id")
+df.questionnaire <- df.questionnaire_RAW %>% dplyr::anti_join(tibble::tibble(id = badIDs), by = "id")
+
+# Recreate phase-1 view/plot on filtered data
+p1.pTable <- df.pTable %>% dplyr::filter(phase == 1L)
+p2.pTable <- df.pTable %>% dplyr::filter(phase == 2L)
+#plot(p2.pTable$propBest_HvLv, df.questionnaire$SSS)
+#cor.test(p2.pTable$propBest_HvLv, df.questionnaire$SSS)
+
+nSub <- length(unique(df.choice$id))
+nRd <- length(unique(df.choice$Round))
+nTrial <- length(unique(df.choice$Trial))
+
+# Add median/Extreme group splits on df.questionnaire
+df.questionnaire <- df.questionnaire %>% mutate(
+  SSS_group = ifelse(SSS >= median(SSS, na.rm = TRUE), "High", "Low"),
+  BIS_group = ifelse(BIS >= median(BIS, na.rm = TRUE), "High", "Low"),
+  #Extreme group comparison 
+  SSS_ExGroup = case_when(
+    SSS <= quantile(SSS, 0.25, na.rm = TRUE) ~ "Low",
+    SSS >= quantile(SSS, 0.75, na.rm = TRUE) ~ "High",
+    TRUE ~ NA_character_  # middle excluded
+  ),
+  BIS_ExGroup = case_when(
+    BIS <= quantile(BIS, 0.25, na.rm = TRUE) ~ "Low",
+    BIS >= quantile(BIS, 0.75, na.rm = TRUE) ~ "High",
+    TRUE ~ NA_character_
+  ))
+
+# Calculate mean age, sd and gender 
+nFemale <- nSub - sum(df.questionnaire$gender)
+mean_age <- mean(df.questionnaire$age)
+sd_age <- sd(df.questionnaire$age)
+
+# Plot Distributions for visual check 
+plot_histograms(df.questionnaire, columns = c("age","gender","IQ"))
+```
+## Questionnaire Coorelation Plots
+This block plots the correlation matrix for questionniare data (Figure S5)
+```{r questionnaire_corr}
+plot_corr_matrix_sig <- function(data, vars,
+                                 method = "pearson",
+                                 show_values = TRUE,
+                                 triangle = c("lower", "upper", "full")) {
+  triangle <- match.arg(triangle)
+
+  df_sub <- data %>%
+    dplyr::select(dplyr::all_of(vars)) %>%
+    tidyr::drop_na()
+
+  cor_mat <- stats::cor(df_sub, use = "pairwise.complete.obs", method = method)
+
+  p_mat <- matrix(NA_real_,
+                  nrow = length(vars),
+                  ncol = length(vars),
+                  dimnames = list(vars, vars))
+
+  for (i in seq_along(vars)) {
+    for (j in seq_along(vars)) {
+      if (i == j) {
+        p_mat[i, j] <- NA_real_
+      } else {
+        x <- df_sub[[vars[i]]]
+        y <- df_sub[[vars[j]]]
+        ok <- stats::complete.cases(x, y)
+        if (sum(ok) > 2) {
+          p_mat[i, j] <- stats::cor.test(x[ok], y[ok], method = method)$p.value
+        } else {
+          p_mat[i, j] <- NA_real_
+        }
+      }
+    }
+  }
+
+  cor_long <- cor_mat %>%
+    as.data.frame() %>%
+    rownames_to_column("var1") %>%
+    pivot_longer(
+      cols = -var1,
+      names_to = "var2",
+      values_to = "r"
+    )
+
+  p_long <- p_mat %>%
+    as.data.frame() %>%
+    rownames_to_column("var1") %>%
+    pivot_longer(
+      cols = -var1,
+      names_to = "var2",
+      values_to = "p"
+    )
+
+  cor_long <- cor_long %>%
+    left_join(p_long, by = c("var1", "var2")) %>%
+    mutate(
+      var1 = factor(var1, levels = vars),
+      var2 = factor(var2, levels = vars)
+    )
+
+  if (triangle != "full") {
+    cor_long <- cor_long %>%
+      filter(
+        if (triangle == "lower")
+          as.numeric(var1) >= as.numeric(var2)
+        else
+          as.numeric(var1) <= as.numeric(var2)
+      )
+  }
+
+  cor_long$stars <- ifelse(
+    is.na(cor_long$p), "",
+    ifelse(cor_long$p < 0.001, "***",
+    ifelse(cor_long$p < 0.01,  "**",
+    ifelse(cor_long$p < 0.05,  "*", "")))
+  )
+
+  if (show_values) {
+    cor_long$label <- sprintf("%.2f%s", cor_long$r, cor_long$stars)
+  } else {
+    cor_long$label <- ""
+  }
+
+  p <- ggplot(cor_long, aes(x = var1, y = var2, fill = r)) +
+    geom_tile(color = "white", linewidth = 0.4) +
+    {
+      if (show_values) geom_text(aes(label = label), size = 3) else NULL
+    } +
+    scale_fill_gradient2(
+      limits = c(-1, 1),
+      breaks = seq(-1, 1, 0.5),
+      name = "r",
+      low = "#2166AC",
+      mid = "white",
+      high = "#B2182B"
+    ) +
+    coord_fixed() +
+    theme_minimal(base_size = 11) +
+    theme(
+      axis.title.x    = element_blank(),
+      axis.title.y    = element_blank(),
+      axis.text.x     = element_text(angle = 45, hjust = 1, vjust = 1),
+      panel.grid      = element_blank(),
+      legend.position = "right",
+      legend.title    = element_text(size = 10),
+      legend.text     = element_text(size = 9),
+      plot.margin     = margin(5.5, 5.5, 5.5, 5.5)
+    )
+
+  if (triangle != "full") {
+    p <- p + scale_y_discrete(position = "right")
+  }
+
+  return(p)
+}
+
+
+plot_corr_matrix_sig(
+  df.questionnaire,
+  vars = c("SSS","BIS","DASS.D","DASS.A","DASS.S","OCIR","AUDIT","DAST","IQ","age"),
+  method = "pearson",
+  triangle = "lower",
+  show_values = TRUE
+)
+
+# Plot with GGgally
+panel_cor_stars <- function(data, mapping,
+                            method = "pearson",
+                            digits = 2,
+                            ...) {
+
+  x <- GGally::eval_data_col(data, mapping$x)
+  y <- GGally::eval_data_col(data, mapping$y)
+
+  ok <- stats::complete.cases(x, y)
+  if (sum(ok) < 3) {
+    return(ggplot() + theme_void())
+  }
+
+  ct <- stats::cor.test(x[ok], y[ok], method = method)
+  r  <- unname(ct$estimate)
+  p  <- ct$p.value
+
+  stars <- ifelse(p < 0.001, "***",
+           ifelse(p < 0.01,  "**",
+           ifelse(p < 0.05,  "*", "")))
+  label <- sprintf(paste0("%.", digits, "f%s"), r, stars)
+
+  ggplot(data.frame(x = 0.5, y = 0.5)) +
+    aes(x, y) +
+    geom_text(label = label, size = 4, ...) +
+    xlim(0, 1) + ylim(0, 1) +
+    theme_void()
+}
+
+
+plot_pairs_corr_dists <- function(data, vars,
+                                  method = "pearson") {
+
+  df_sub <- data %>%
+    dplyr::select(dplyr::all_of(vars)) %>%
+    tidyr::drop_na()
+
+  p <- GGally::ggpairs(
+    df_sub,
+    columns = vars,
+    upper = list(
+      continuous = function(data, mapping, ...) {
+        panel_cor_stars(data, mapping, method = method, ...)
+      }
+    ),
+    lower = list(
+      continuous = GGally::wrap(
+        "smooth",
+        se = FALSE,
+        size = 0.1,
+        alpha = 0.2
+      )
+    ),
+    diag = list(
+      continuous = GGally::wrap(
+        "densityDiag",
+        alpha = 0.7
+      )
+    )
+  )
+
+  p + 
+    theme_bw(base_size = 10) +
+    theme(
+      panel.grid       = element_blank(),
+      strip.background = element_rect(fill = "white", colour = NA),
+      strip.text       = element_text(size = 9),
+      axis.text.x      = element_text(size = 7),
+      axis.text.y      = element_text(size = 7)
+    )
+}
+
+vars_q <- c("SSS","BIS","DASS.D","DASS.A","DASS.S","OCIR","AUDIT","DAST","IQ","age")
+q_corplotwithdist <- plot_pairs_corr_dists(df.questionnaire, vars_q)
+
+
+```
+
+
+## Do plots for model preds
+This block plots model predictions from BMT and BLBB for one example subject (i.e. Figure 4A)
+```{r model_predictions}
+
+#rename_term <- function(x) {
+#  x |>
+#    str_replace_all("dRmu",         "ΔR\u03bc") |>
+#    str_replace_all("dSmu",        "ΔS\u03bc") |>
+#    str_replace_all("dSsig",        "ΔS\u03c3") |>
+#    str_replace_all("dMotorSticky", "Motor\nStickiness") |>
+#    str_replace_all("zSSS",         "\nSS") |>
+#    str_replace_all("zBIS",         "\nIP") |>
+#    str_replace_all(":",            " × ")
+#}
+
+load("data/modelPreds.RData")
+
+plot_track_one <- function(
+  vars, subj, round,
+  var_labels = NULL,
+  bandit_labels = NULL,
+  free_y = TRUE,
+  shade_facets = c("Smu", "Ssig"),  # indicates which variables to shade
+  shade_to = 30,                     # shade trials 1..shade_to
+  shade_fill = "grey90",
+  shade_alpha = 0.05
+) {
+  stopifnot(is.list(vars), length(vars) >= 1)
+
+  # check for variabkles
+  dims_list <- lapply(vars, dim)
+  if (!all(vapply(dims_list, function(x) length(x) == 4, logical(1))))
+    stop("All inputs must be 4D arrays: [subj, round, trial, bandit].")
+  d0 <- dims_list[[1]]
+  if (!all(vapply(dims_list, function(x) all(x == d0), logical(1))))
+    stop("All arrays must have identical dimensions.")
+
+  ns <- d0[1]; nr <- d0[2]; nt <- d0[3]; nb <- d0[4]
+  if (subj  < 1 || subj  > ns) stop("subj out of range.")
+  if (round < 1 || round > nr) stop("round out of range.")
+
+  # Use dimnames if available for labels
+  dn <- dimnames(vars[[1]])
+  subj_lab  <- if (!is.null(dn) && !is.null(dn[[1]])) dn[[1]][subj] else paste0("S", subj)
+  round_lab <- if (!is.null(dn) && !is.null(dn[[2]])) dn[[2]][round] else paste0("R", round)
+  if (is.null(bandit_labels)) {
+    bandit_labels <- if (!is.null(dn) && !is.null(dn[[4]])) dn[[4]] else paste0("Bandit ", seq_len(nb))
+  }
+
+  # Default pretty labels; keep panel order as supplied in 'vars'
+  if (is.null(var_labels)) var_labels <- setNames(names(vars), names(vars))
+  var_levels <- unname(var_labels[names(vars)])
+
+  # helper: slice one array -> long df
+  mat_to_long <- function(arr, vname) {
+    mat <- arr[subj, round, , , drop = TRUE]  # [trial × bandit]
+    df  <- as.data.frame(mat)
+    names(df) <- bandit_labels
+    df$trial <- seq_len(nt)
+    tidyr::pivot_longer(df, -trial, names_to = "bandit", values_to = "value") |>
+      dplyr::mutate(variable = vname)
+  }
+
+  long_df <- dplyr::bind_rows(
+    mapply(mat_to_long, vars, var_labels[names(vars)], SIMPLIFY = FALSE)
+  )
+  long_df$variable <- factor(long_df$variable, levels = var_levels)
+
+  shade_labels <- var_labels[intersect(names(var_labels), shade_facets)]
+  shade_labels <- unname(shade_labels[!is.na(shade_labels)])
+
+  if (length(shade_labels) > 0) {
+    shade_df <- data.frame(
+      variable = factor(shade_labels, levels = levels(long_df$variable)),
+      xmin = 0,
+      xmax = min(shade_to, nt),
+      ymin = -Inf,
+      ymax = Inf
+    )
+  } else {
+    shade_df <- NULL
+  }
+
+  p <- ggplot(long_df, aes(trial, value, color = bandit, group = bandit)) +
+    # draw shaded band FIRST so it's behind lines/points
+    { if (!is.null(shade_df))
+        geom_rect(data = shade_df,
+                  aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+                  inherit.aes = FALSE, fill = shade_fill, alpha = shade_alpha)
+      else NULL } +
+    geom_line(linewidth = 1) +
+    geom_point(size = 1.4, alpha = 0.75) +
+    facet_wrap(~ variable, ncol = 4, nrow = 1, scales = if (free_y) "free_y" else "fixed") +
+    scale_color_brewer(palette = "Dark2", name = "Bandit") +
+    labs(
+      title = sprintf("Model Predictions (scaled)"),
+      x = "Trial", y = "Value", color = "Bandit"
+    ) +
+    theme_classic(base_size = 12) +
+    theme(legend.position = "none",
+          strip.background = element_blank(),
+          strip.text = element_text()#,  # keep the text
+          #panel.border = element_blank()
+          ) 
+
+  list(plot = p, data = long_df)
+}
+
+
+scaled.Smu[,,1:30,][scaled.Smu[,,1:30,] == 0] <- NA
+scaled.Ssig[,,1:30,][scaled.Ssig[,,1:30,] == 0] <- NA
+
+vars <- list(
+  Rmu  = scaled.Rmu,
+  Rsig = scaled.Rsig,
+  Smu  = scaled.Smu,
+  Ssig = scaled.Ssig
+ 
+)
+
+# Plot subject 3, round 1; shade trials 1–30 on Smu & Ssig only
+res <- plot_track_one(
+  vars        = vars,
+  subj        = 3,
+  round       = 1,
+  var_labels  = c(Rmu="Reward Mean (R\u03bc)", Rsig="Reward Uncertainty (R\u03c3)",
+                  Smu="Stimulation Mean (S\u03bc)", Ssig="Stimulation Uncertainty (S\u03c3)"),
+  bandit_labels = paste0("Bandit ", 1:dim(scaled.Rmu)[4]),  # optional
+  free_y      = FALSE,                
+  shade_facets = c("Ssig","Smu"),     # which panels to shade
+  shade_alpha = 1,
+  shade_to     = 31                    # shade trials 1..30
+)
+
+fig.ModelPreds <- res$plot
+fig.ModelPreds
+
+```
+
+## Correlation plots of SS and BIS 
+This block looks at the correlation between SS and IP (Figure 3A) and their associations with omission rates (Figure S4)
+```{r SS-BIS_COR}
+
+col.SSS <- "#ee9b00"
+col.BIS <- "#0A9396"
+
+# correlation stats for the annotation
+ct   <- cor.test(df.questionnaire$BIS, df.questionnaire$SSS, use = "pairwise.complete.obs")
+r    <- unname(ct$estimate)
+pLab <- ifelse(ct$p.value < .001, "< .001", sprintf("= %.3f", ct$p.value))
+lab  <- sprintf("r = %.2f,  p %s", r, pLab)
+
+# base scatter with regression line
+p <- ggplot(df.questionnaire, aes(x = BIS, y = SSS)) +
+  geom_point(alpha = 0.45, size = 2, color = "#3F3F3F") +
+  geom_smooth(method = "lm", se = TRUE, color = "#3F3F3F", linewidth = 1) +
+  annotate("text", x = 65, y = 35, hjust = -0.05, vjust = -1.1,
+           label = lab, size = 4) +
+  labs(
+    title = "Correlation between SS and IP",
+    x = "IP (BIS-21)",
+    y = "SS (SSS-V)"
+  ) +
+  theme_classic(base_size = 12) 
+
+# add differently coloured marginals (x = BIS, y = SSS)
+# Figure 3A
+fig.SS_IP_COR <- ggMarginal(
+  p, type = "histogram", margins = "both",
+  xparams = list(fill = col.BIS, color = "black", alpha = 0.8, bins = 30),
+  yparams = list(fill = col.SSS, color = "black", alpha = 0.8, bins = 30)
+)
+
+# Check for Omissions
+# Look at  number of missed trials
+df.choice_missed <- df.choice %>%
+  dplyr::mutate(missed = as.numeric(choice == 0)) %>%
+  dplyr::group_by(Subject,id) %>%
+  dplyr::summarise(n_missed = sum(missed)/4,.groups = "drop") %>%
+  dplyr::left_join(df.questionnaire, by = "id")
+
+cor.test(df.choice_missed$n_missed,df.choice_missed$SSS,meth0d = "spearman")
+
+df.choice_missed <- df.choice %>%
+  mutate(missed = as.numeric(choice == 0)) %>%
+  group_by(Subject, id) %>%       
+  summarise(
+    prop_missed = mean(missed, na.rm = TRUE),
+    performance = sum(reward, na.rm = TRUE)/4,
+    .groups = "drop"
+  ) %>%
+  left_join(df.questionnaire, by = "id") #%>%
+  #dplyr::mutate(Round = factor(Round, ordered=T, levels=c(1,2,3,4)))
+
+# Figure S4A
+plot.SSSOmission <- plot_correlation(df.choice_missed, "SSS", "prop_missed",bins = 6,
+                             method = "spearman",
+                             point_color = "#ee9b00", line_color = "#ee9b00",
+                             title = "SS ~ Omission") + 
+  labs(x = "SS", y = "Omission Rate")
+
+plot.SSSOmission
+
+plot.BISOmission <- plot_correlation(df.choice_missed, "BIS", "prop_missed", bins = 6,
+                             method = "spearman",
+                             point_color ="#0A9396", line_color ="#0A9396",
+                             title = "IP ~ Omission") + 
+  labs(x = "IP", y = "Omission Rate")
+
+plot.BISOmission
+
+
+# Figure S4B
+plot_histograms(df.choice_missed, "prop_missed", bins = 30, fill_color = "#0A9396", density_color = "#BB3E03", title_prefix = "Distribution of Omission Rates")
+
+
+```
+
+## Look at learning curves
+"Low" = "#0A9396", "High" = "#ee9b00"
+This block looks at performance measures, learning curves, entropy measures, RTs for low vs high trait groups (Figure 3 + Figure S1-3)  
+Regression results are also available here
+```{r learning_curves, echo=FALSE}
+
+# Look at total points earned
+df.subjectPerformance <- df.choice %>%
+  mutate(missed = as.numeric(choice == 0)) %>%
+  dplyr::summarise(
+    meantotalScore = mean(reward, na.rm = TRUE),
+    prop_missed    = mean(missed, na.rm = TRUE),
+    .by = c(Subject, id)
+  ) %>%
+  dplyr::left_join(df.questionnaire, by = "id")
+
+phase_bands <- tibble(
+  phase = c("Phase 1","Phase 2"),
+  xmin  = c(0.5, 2.5),
+  xmax  = c(2.5, 4.5)
+)
+
+plot_histograms(df.subjectPerformance, "meantotalScore", bins = 30, fill_color = "#0A9396", density_color = "#BB3E03", title_prefix = "Distribution of Performance")
+
+
+plot.SSSPerf <- plot_correlation(df.subjectPerformance, "SSS", "meantotalScore", control_vars = NULL, bins = 6,
+                             method = "pearson",
+                             point_color = "#ee9b00", line_color = "#ee9b00",
+                             title = "SS ~ Peformance") + 
+  labs(x = "SS", y = "Mean Reward")
+
+plot.BISPerf <- plot_correlation(df.subjectPerformance, "BIS", "meantotalScore", control_vars = NULL, bins = 6,
+                             method = "pearson",
+                             point_color = "#0A9396", line_color = "#0A9396",
+                             title = "IP ~ Peformance") + 
+  labs(x = "IP", y = "Mean Reward")
+
+
+lm.performanceTrait <- lm(
+  scale(meantotalScore)[,1] ~ scale(SSS)[,1] * scale(BIS)[,1] + scale(prop_missed)[,1],
+  data = df.subjectPerformance
+)
+
+summary(lm.performanceTrait)
+
+
+# Look at learning dynamics 
+df.learningBins <- df.choice %>%
+  group_by(Subject, Round) %>%
+  mutate(bin = dplyr::ntile(Trial, 4L),
+         missed = as.numeric(choice == 0)) %>%   # bins 1..4 within each round
+  ungroup() 
+
+df.subLearningBins <- df.learningBins %>%
+  dplyr::group_by(Subject,id, Round, bin) %>%
+  dplyr::summarise(bin_reward = mean(reward, na.rm = TRUE),
+            prop_missed    = mean(missed, na.rm = TRUE),
+            .groups = "drop") %>%
+  dplyr::group_by(Subject,id,bin) %>%
+  dplyr::summarise(bin_reward = mean(bin_reward, na.rm = TRUE),
+            prop_missed = mean(prop_missed, na.rm = TRUE),
+            .groups = "drop") %>%
+  dplyr::left_join(df.questionnaire, by = "id") %>%
+  dplyr::mutate(bin = factor(bin, ordered = TRUE, levels=c(1,2,3,4)),
+                #bin = as.numeric(bin),
+                zSSS = scale(SSS),
+                zBIS = scale(BIS),
+                zOmission = scale(prop_missed))
+
+
+m.traitLearningBins <- lmer(bin_reward~zSSS*bin +zBIS*bin + zOmission + (1 | id),data=df.subLearningBins)
+summary(m.traitLearningBins)
+plot_model(m.traitLearningBins)
+
+plot_df_traitLearningBins <- sjPlot::get_model_data(
+  m.traitLearningBins,
+  type  = "est",
+  terms = c("zSSS", "zBIS", "bin.L","zSSS:bin.L", "bin.L:zBIS","zOmission")  # adjust if names differ
+) %>%
+  mutate(
+    term_chr = as.character(term),
+    sign     = if_else(estimate >= 0, "Positive", "Negative"),
+    label    = term_chr  
+  )
+
+label_map_traitLearningBins <- c(
+  "zSSS"          = "SS (z)",
+  "zBIS"          = "IP (z)",
+  "zOmission" = "Omission (z)",
+  "bin.L"           = "Bin",
+  "zSSS:bin.L"    = "SS × Bin",
+  "bin.L:zBIS"    = "IP × Bin"
+  
+)
+
+plot_df_traitLearningBins <- plot_df_traitLearningBins %>%
+  mutate(
+    label = dplyr::recode(as.character(label), !!!label_map_traitLearningBins)
+  )
+
+# Order predictors top-to-bottom in the plot
+manual_order_traitLearningBins <- c(
+  "SS (z)",
+  "IP (z)",
+  "Omission (z)",
+  "Bin",
+  "SS × Bin",
+  "IP × Bin"
+)
+
+plot_df_traitLearningBins <- plot_df_traitLearningBins %>%
+  mutate(
+    label = factor(label, levels = rev(manual_order_traitLearningBins))  # rev = top-down
+  )
+
+# Colours for positive / negative
+cols <- c("Negative" = "#AE2012", "Positive" = "#005F73")
+plot_traitLearningBins <- ggplot(plot_df_traitLearningBins,
+                  aes(y = label, x = estimate, colour = sign)) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.15, linewidth = 1.0) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = cols, guide = "none") +
+  theme_classic(base_size = 12) +
+  labs(
+    title = "Predictors of Performance",
+    subtitle = "Performance ~ (SS + IP) x Trial Bin + Omission",
+    x = "Coefficient (\u03B2)",
+    y = "Predictor"
+  )
+
+plot_traitLearningBins
+
+# Plot learning curves
+library(colorspace)
+col.SSS <- "#ee9b00"
+pal.SSS  <- c(Low = lighten(col.SSS, amount = 0.5),
+          High = col.SSS)
+
+col.BIS <- "#0A9396"
+pal.BIS  <- c(Low = lighten(col.BIS, amount = 0.5),
+          High = col.BIS)
+
+
+rewardCurves.POP <- rewardCurves.SSS <- df.subLearningBins %>%
+  group_by(bin) %>%
+  summarise(mean_total = mean(bin_reward, na.rm = TRUE),
+            se         = sd(bin_reward, na.rm = TRUE) / sqrt(sum(!is.na(bin_reward))),
+            .groups = "drop") %>%
+  mutate(bin = as.numeric(as.character(bin)))
+
+
+rewardCurves.SSS <- df.subLearningBins %>%
+  group_by(SSS_group,bin) %>%
+  summarise(mean_total = mean(bin_reward, na.rm = TRUE),
+            se         = sd(bin_reward, na.rm = TRUE) / sqrt(sum(!is.na(bin_reward))),
+            .groups = "drop") %>%
+  mutate(bin = as.numeric(as.character(bin)))
+
+
+
+
+fig.SSSLearning <- ggplot(rewardCurves.SSS,
+                          aes(x = bin, y = mean_total,
+                              group = SSS_group, color = SSS_group, fill = SSS_group)) +
+  geom_rect(data = phase_bands,
+            aes(xmin = 1, xmax = 2.5, ymin = -Inf, ymax = Inf, fill = "grey90"),
+            inherit.aes = FALSE, alpha = 0.05, color = NA) +
+   # optional labels for the bands
+  annotate("text", x = 1.75, y = max(rewardCurves.SSS$mean_total) + 0.2, label = "Phase 1", fontface = "bold", colour = "grey30") +
+  annotate("text", x = 3.25, y = max(rewardCurves.SSS$mean_total) + 0.2, label = "Phase 2", fontface = "bold", colour = "grey30") +
+  
+  geom_ribbon(aes(ymin = pmax(0, mean_total - se),
+                  ymax = mean_total + se),
+              alpha = 0.18, color = NA) +
+  geom_line() +
+  geom_line(
+    data = rewardCurves.POP,
+    aes(x = bin, y = mean_total),
+    inherit.aes = FALSE,
+    linewidth = 1,
+    linetype = "dotted",
+    color = "#AE2012",
+    alpha = 0
+  ) +
+  geom_point() +
+  #ggbeeswarm::geom_beeswarm(data = df.subLearningBins %>% dplyr::filter(!is.na(SSS_group)),
+  #           aes(x = bin, y = bin_reward), inherit.aes = FALSE,
+  #           position = position_jitter(width = 0.08, height = 0),
+  #           color = "grey70", alpha = 0.18, size = 1.2) +
+  scale_x_continuous(breaks = 1:4) +
+  scale_color_manual(values = pal.SSS) +
+  scale_fill_manual(values = pal.SSS) +
+  labs(
+    x = "Trial bin",
+    y = "Mean Performance",
+    title = "Performance Curves by Median Splits",
+    color = "SS",
+    fill = "SS"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top")
+
+fig.SSSLearning
+
+rewardCurves.BIS <- df.subLearningBins %>%
+  group_by(BIS_group,bin) %>%
+  summarise(mean_total = mean(bin_reward, na.rm = TRUE),
+            se         = sd(bin_reward, na.rm = TRUE) / sqrt(sum(!is.na(bin_reward))),
+            .groups = "drop") %>%
+  mutate(bin = as.numeric(as.character(bin)))
+
+
+fig.BISLearning <- ggplot(rewardCurves.BIS, aes(x = bin, y = mean_total,group=BIS_group, fill=BIS_group)) +
+  geom_line() + geom_point() +
+  geom_ribbon(aes(ymin = pmax(0, mean_total - se),
+                  ymax = mean_total + se),
+              alpha = 0.18, color = NA) +
+   #ggbeeswarm::geom_beeswarm(data = df.subLearningBins %>% dplyr::filter(!is.na(BIS_group)),
+    #         aes(x = bin, y = bin_reward), inherit.aes = FALSE,
+    #         position = position_jitter(width = 0.08, height = 0),
+    #         color = "grey70", alpha = 0.18, size = 1.2) +
+  scale_x_continuous(breaks = 1:4) +
+  scale_color_manual(values = pal.BIS) +
+  scale_fill_manual(values = pal.BIS) +
+  labs(title = "Impulsivity",
+       x = "Trial Bin", y = "Total reward",
+       color = "Phase", fill = "Phase") +
+  theme_classic()
+
+
+fig.BISLearning <- ggplot(rewardCurves.BIS,
+                          aes(x = bin, y = mean_total,
+                              group = BIS_group, color = BIS_group, fill = BIS_group)) +
+  geom_rect(data = phase_bands,
+            aes(xmin = 1, xmax = 2.5, ymin = -Inf, ymax = Inf, fill = "grey90"),
+            inherit.aes = FALSE, alpha = 0.05, color = NA) +
+   # optional labels for the bands
+  annotate("text", x = 1.75, y = max(rewardCurves.BIS$mean_total) + 0.2, label = "Phase 1", fontface = "bold", colour = "grey30") +
+  annotate("text", x = 3.25, y = max(rewardCurves.BIS$mean_total) + 0.2, label = "Phase 2", fontface = "bold", colour = "grey30") +
+  
+  geom_ribbon(aes(ymin = pmax(0, mean_total - se),
+                  ymax = mean_total + se),
+              alpha = 0.18, color = NA) +
+  geom_line() +
+  geom_line(
+    data = rewardCurves.POP,
+    aes(x = bin, y = mean_total),
+    inherit.aes = FALSE,
+    linewidth = 1,
+    linetype = "dotted",
+    color = "#AE2012",
+    alpha = 0
+  ) +
+  geom_point() +
+  #ggbeeswarm::geom_beeswarm(data = df.subLearningBins %>% dplyr::filter(!is.na(SSS_group)),
+  #           aes(x = bin, y = bin_reward), inherit.aes = FALSE,
+  #           position = position_jitter(width = 0.08, height = 0),
+  #           color = "grey70", alpha = 0.18, size = 1.2) +
+  scale_x_continuous(breaks = 1:4) +
+  scale_color_manual(values = pal.BIS) +
+  scale_fill_manual(values = pal.BIS) +
+  labs(
+    x = "Trial bin",
+    y = "Mean Performance",
+    title = "Performance Curves by Median Splits",
+    color = "IP",
+    fill = "IP"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top")
+
+
+#############################
+# Look at round performance
+#############################
+df.roundPerformance <- df.learningBins %>%
+  dplyr::group_by(Subject,id,Round) %>%
+  dplyr::summarise(roundScore=sum(reward), .groups = "drop") %>%
+  dplyr::left_join(df.questionnaire, by = c("id","Subject")) %>%
+  dplyr::mutate(Round = factor(Round, ordered = TRUE, levels = c(1,2,3,4)),
+                zSSS = scale(SSS),
+                zBIS = scale(BIS))
+
+m.roundPerformanceTrait <- lmer(roundScore ~ zSSS * Round + zBIS*Round + (1|id), data= df.roundPerformance)
+summary(m.roundPerformanceTrait)
+
+
+plot_df_roundPerformanceTrait <- sjPlot::get_model_data(
+  m.roundPerformanceTrait,
+  type  = "est",
+  terms = c("zSSS", "zBIS", "Round.L","zSSS:Round.L", "Round.L:zBIS") 
+) %>%
+  mutate(
+    term_chr = as.character(term),
+    sign     = if_else(estimate >= 0, "Positive", "Negative"),
+    label    = term_chr 
+  )
+
+label_map_roundPerformanceTrait <- c(
+  "zSSS"          = "SS (z)",
+  "zBIS"          = "IP (z)",
+  "Round.L"           = "Round",
+  "zSSS:Round.L"    = "SS × Round",
+  "Round.L:zBIS"    = "IP × Round"
+  
+)
+
+plot_df_roundPerformanceTrait <- plot_df_roundPerformanceTrait%>%
+  mutate(
+    label = dplyr::recode(as.character(label), !!!label_map_roundPerformanceTrait)
+  )
+
+# Order predictors top-to-bottom in the plot
+manual_order_roundPerformanceTrait <- c(
+  "SS (z)",
+  "IP (z)",
+  "Round",
+  "SS × Round",
+  "IP × Round"
+)
+
+plot_df_roundPerformanceTrait <- plot_df_roundPerformanceTrait %>%
+  mutate(
+    label = factor(label, levels = rev(manual_order_roundPerformanceTrait))  # rev = top-down
+  )
+
+# Colours for positive / negative
+cols <- c("Negative" = "#AE2012", "Positive" = "#005F73")
+
+# ---- Plot ----
+plot_roundPerformanceTrait <- ggplot(plot_df_roundPerformanceTrait,
+                  aes(y = label, x = estimate, colour = sign)) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.15, linewidth = 1.0) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = cols, guide = "none") +
+  theme_classic(base_size = 12) +
+  labs(
+    title = "Predictors of Round Performance",
+    subtitle = "Performance ~ (SS + IP) x Round",
+    x = "Coefficient (\u03B2)",
+    y = "Predictor"
+  )
+
+plot_roundPerformanceTrait
+
+roundCurves.SSS <- df.roundPerformance %>%
+  dplyr::group_by(SSS_group,Round) %>%
+  dplyr::summarise(mean_total = mean(roundScore, na.rm = TRUE),
+            se         = sd(roundScore, na.rm = TRUE) / sqrt(sum(!is.na(roundScore))),
+            .groups = "drop")
+
+
+fig.SSSRound <- ggplot(roundCurves.SSS,
+                          aes(x = Round, y = mean_total,
+                              group = SSS_group, color = SSS_group, fill = SSS_group)) +
+  geom_ribbon(aes(ymin = pmax(0, mean_total - se),
+                  ymax = mean_total + se),
+              alpha = 0.18, color = NA) +
+  geom_line() +
+  geom_point() +
+  scale_color_manual(values = pal.SSS) +
+  scale_fill_manual(values = pal.SSS) +
+  labs(
+    x = "Round Number",
+    y = "Mean Performance",
+    title = "Round Performance by Median Splits",
+    color = "SS",
+    fill = "SS"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top")
+
+
+roundCurves.BIS <- df.roundPerformance %>%
+  dplyr::group_by(BIS_group,Round) %>%
+  dplyr::summarise(mean_total = mean(roundScore, na.rm = TRUE),
+            se         = sd(roundScore, na.rm = TRUE) / sqrt(sum(!is.na(roundScore))),
+            .groups = "drop")
+
+fig.BISRound <- ggplot(roundCurves.BIS,
+                          aes(x = Round, y = mean_total,
+                              group = BIS_group, color = BIS_group, fill = BIS_group)) +
+  geom_ribbon(aes(ymin = pmax(0, mean_total - se),
+                  ymax = mean_total + se),
+              alpha = 0.18, color = NA) +
+  geom_line() +
+  geom_point() +
+  scale_color_manual(values = pal.BIS) +
+  scale_fill_manual(values = pal.BIS) +
+  labs(
+    x = "Round Number",
+    y = "Mean Performance",
+    title = "Round Performance by Median Splits",
+    color = "IP",
+    fill = "IP"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top")
+
+#############
+# Entropy
+###############
+
+entropy_by_Sub <- df.pTable %>%
+  dplyr::group_by(Subject, id) %>%
+  dplyr::summarise(
+    total   = sum(c_across(matches("^V[1-6]$")), na.rm = TRUE),           # V1..V6 only
+    entropy = -sum((c_across(matches("^V[1-6]$"))/total) *
+                   log2((c_across(matches("^V[1-6]$"))/total)),
+                   na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(df.questionnaire, by = c("Subject","id"))%>%
+  left_join(df.subjectPerformance, by = c("id"))
+
+plot_histograms(entropy_by_Sub, "entropy", bins = 30, fill_color = "#0A9396", density_color = "#BB3E03", title_prefix = "Distribution of Choice Entropy")
+
+plot.PerfEntropy <- plot_correlation(entropy_by_Sub , "meantotalScore", "entropy", control_vars = NULL,bins = NULL,
+                             method = "spearman",
+                             point_color = "#3F3F3F", line_color = "#3F3F3F",
+                             title = "Performance ~ Entropy") + 
+  labs(x = "Performance", y = "Choice Entropy")
+
+plot.SSSEnt <- plot_correlation(entropy_by_bin , "SSS", "entropy", control_vars = NULL,bins = 6,
+                             method = "pearson",
+                             point_color = "#ee9b00", line_color = "#ee9b00",
+                             title = "SS ~ Entropy") + 
+  labs(x = "SS", y = "Choice Entropy")
+
+plot.BISEnt <- plot_correlation(entropy_by_bin, "BIS", "entropy", control_vars = NULL,bins = 6,
+                             method = "pearson",
+                             point_color = "#0A9396", line_color = "#0A9396",
+                             title = "IP ~ Entropy") + 
+  labs(x = "IP", y = "Mean Reward")
+
+entropy_by_phase <- df.pTable %>%
+  group_by(Subject, id, phase) %>%
+  summarise(
+    total   = sum(c_across(matches("^V[1-6]$")), na.rm = TRUE),           # V1..V6 only
+    entropy = -sum((c_across(matches("^V[1-6]$"))/total) *
+                   log2((c_across(matches("^V[1-6]$"))/total)),
+                   na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(df.questionnaire, by = c("Subject","id"))%>%
+  dplyr::mutate(phase = factor(phase, ordered = TRUE, levels=c(1,2)))
+
+
+# Some exploratoy entropy analysis
+cor.test(entropy_by_phase$SSS,entropy_by_phase$entropy)
+
+tmp <- lmer(entropy~SSS*phase + (1|id), data = entropy_by_phase)
+
+
+ggplot(entropy_by_phase, aes(x = SSS_group, y = entropy, fill = SSS_group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+  geom_jitter(width = 0.15, alpha = 0.6) +
+  facet_wrap(~ phase) +
+  stat_compare_means(comparisons = list(c("Low", "High")), method = "t.test") +
+  labs(y = "Entropy (bits)", title = "Entropy across objects (excluding missed trials)") +
+  theme_classic(base_size = 14)
+
+
+ggplot(entropy_by_phase, aes(x = BIS_group, y = entropy, fill = BIS_group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+  geom_jitter(width = 0.15, alpha = 0.6) +
+  facet_wrap(~ phase) +
+  stat_compare_means(comparisons = list(c("Low", "High")), method = "t.test") +
+  labs(y = "Entropy (bits)", title = "Entropy across objects (excluding missed trials)") +
+  theme_classic(base_size = 14)
+
+ent_wide <- entropy_by_phase %>%
+  select(Subject, id, phase, entropy, SSS_group, SSS, BIS) %>%
+  pivot_wider(names_from = phase, values_from = entropy, names_prefix = "entropy_p") %>%
+  mutate(delta_entropy = entropy_p2 - entropy_p1)
+
+t_SSS <- t.test(delta_entropy ~ SSS_group, data = ent_wide)
+t_SSS
+
+m_cont <- lm(delta_entropy ~ scale(SSS) + scale(BIS), data = ent_wide)
+summary(m_cont)
+
+# Box + jitter by SSS group on delta entropy
+ggplot(ent_wide, aes(x = SSS_group, y = delta_entropy, fill = SSS_group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.65) +
+  geom_jitter(width = 0.12, alpha = 0.6, size = 1.8) +
+  stat_compare_means(comparisons = list(c("Low","High")), method = "t.test") +
+  labs(x = NULL, y = expression(Delta~"Entropy (Phase 2 − Phase 1, bits)"),
+       title = "Change in choice entropy from Phase 1 to Phase 2") +
+  scale_fill_manual(values = c("Low" = "#2A9D8F", "High" = "#E76F51")) +
+  theme_classic(base_size = 13) +
+  guides(fill = "none")
+
+# Continuous SSS: scatter with regression line (controls via separate model above)
+ggplot(ent_wide, aes(x = SSS, y = delta_entropy, color = SSS_group)) +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(x = "SSS", y = expression(Delta~"Entropy (P2 − P1, bits)"),
+       title = "ΔEntropy vs. Sensation Seeking") +
+  theme_classic(base_size = 13)
+
+# Entropy by bins 
+pTable_by_bin <- df.learningBins %>%
+  dplyr::group_by(Subject, id, bin, choice) %>%
+  dplyr::summarise(count = dplyr::n(), .groups = "drop_last") %>%
+  dplyr::mutate(prop = count / sum(count)) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(Subject, id, bin, choice) %>%
+  dplyr::summarise(prop = mean(prop), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = choice, values_from = prop, names_prefix = "V") %>%
+  dplyr::mutate(across(starts_with("V"), ~ tidyr::replace_na(.x, 0)))
+
+
+entropy_by_bin <- pTable_by_bin%>%
+  group_by(Subject, id, bin) %>%
+  summarise(
+    total   = sum(c_across(matches("^V[1-6]$")), na.rm = TRUE),           # V1..V6 only
+    entropy = -sum((c_across(matches("^V[1-6]$"))/total) *
+                   log2((c_across(matches("^V[1-6]$"))/total)),
+                   na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(df.questionnaire, by = c("Subject","id")) %>%
+  dplyr::mutate(bin = factor(bin, ordered = TRUE, levels=c(1,2,3,4)))
+
+tmp <- lmer(entropy ~ SSS*bin + BIS*bin + (1|id),data=entropy_by_bin)
+
+ggplot(entropy_by_bin, aes(x = SSS_group, y = entropy, fill = SSS_group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +
+  geom_jitter(width = 0.15, alpha = 0.6) +
+  facet_wrap(~ bin) +
+  ggpubr::stat_compare_means(comparisons = list(c("Low","High")), method = "t.test")+
+  labs(y = "Entropy", title = "Entropy by bin and Sensation Seeking") +
+  theme_classic(base_size = 14) +
+  theme(legend.position = "none")
+
+SSS.entropyCurve <- entropy_by_bin %>%
+  filter(!is.na(SSS_group)) %>%
+  group_by(SSS_group, bin) %>%
+  summarise(
+    mean_entropy = mean(entropy, na.rm = TRUE),
+    sd_entropy   = sd(entropy,   na.rm = TRUE),
+    n_subj  = dplyr::n_distinct(id),
+    se_entropy   = sd_entropy / sqrt(n_subj),
+    .groups = "drop"
+  ) 
+
+SSS.entropyCurve$bin <- as.numeric(as.character(SSS.entropyCurve$bin))
+
+ggplot(SSS.entropyCurve, aes(x = bin, y = mean_entropy, color = SSS_group, fill = SSS_group)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_ribbon(aes(ymin = pmax(0, mean_entropy - se_entropy), ymax = mean_entropy + se_entropy),
+              alpha = 0.18, color = NA) +
+  scale_x_continuous(breaks = sort(unique(SSS.entropyCurve$bin))) +
+  labs(x = "Trial bin", y = "Entropy",
+       title = "Entropy by bin and Sensation Seeking group") +
+  theme_classic(base_size = 13) +
+  theme(legend.position = "top")
+
+
+################
+#RTs
+################
+df.RT <- df.learningBins %>%
+  dplyr::filter(bin.choiceMat > 0, is.finite(rt)) %>%         # keep valid trials
+  dplyr::group_by(Subject, id, bin) %>%
+  dplyr::summarise(
+    n               = dplyr::n(),
+    mean_rt_raw     = mean(rt, na.rm = TRUE)/1000,                 # seconds
+    mean_log_rt     = mean(log(rt/1000), na.rm = TRUE),            # log-seconds
+    median_rt       = median(rt, na.rm = TRUE)/1000,               # seconds
+    geom_mean_rt    = exp(mean(log(rt/1000), na.rm = TRUE)),       # seconds
+    trimmed_mean_rt = mean(rt, trim = 0.1, na.rm = TRUE)/1000,     # seconds
+    rt_var          = sd(log(rt/1000), na.rm = TRUE),              # SD of log-RT
+    .groups = "drop"
+  ) %>%
+  left_join(df.questionnaire, by = c("Subject","id")) %>%
+  dplyr::mutate(bin = factor(bin, ordered= T, levels = c(1,2,3,4)),
+                zSSS = scale(SSS),
+                zBIS = scale(BIS))
+
+m.RTtrait <- lmer(geom_mean_rt ~ zSSS*bin + zBIS*bin + (1|id),data=df.RT)
+summary(m.RTtrait)
+
+plot_df_RT <- sjPlot::get_model_data(
+  m.RTtrait,
+  type  = "est",
+  terms = c("zSSS", "zBIS", "bin.L","zSSS:bin.L", "bin.L:zBIS")  # adjust if names differ
+) %>%
+  mutate(
+    term_chr = as.character(term),
+    sign     = if_else(estimate >= 0, "Positive", "Negative"),
+    label    = term_chr  # edit to pretty labels below if you want
+  )
+
+label_map_RT <- c(
+  "zSSS"          = "SS (z)",
+  "zBIS"          = "IP (z)",
+  "bin.L"           = "Bin",
+  "zSSS:bin.L"    = "SS × Bin",
+  "bin.L:zBIS"    = "IP × Bin"
+)
+
+plot_df_RT <- plot_df_RT %>%
+  mutate(
+    label = dplyr::recode(label, !!!label_map_RT, .default = label)
+  )
+
+manual_order_RT <- c(
+  "SS (z)",
+  "IP (z)",
+  "Bin",
+  "SS × Bin",
+  "IP × Bin"
+)
+
+plot_df_RT <- plot_df_RT %>%
+  mutate(
+    label = factor(label, levels = rev(manual_order_RT))  # rev = top-down
+  )
+
+cols <- c("Negative" = "#AE2012", "Positive" = "#005F73")
+
+plot_RT <- ggplot(plot_df_RT,
+                  aes(y = label, x = estimate, colour = sign)) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.15, linewidth = 1.0) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = cols, guide = "none") +
+  theme_classic(base_size = 12) +
+  labs(
+    title = "Predictors of Reaction Time",
+    subtitle = "log(RT) ~ SS x IP x Trial Bin",
+    x = "Coefficient (\u03B2)",
+    y = "Predictor"
+  )
+
+plot_RT
+
+rt_metric <- "geom_mean_rt"  # or "median_rt" or "mean_rt_raw"
+
+rtCurve.SSS <- df.RT %>%
+  dplyr::filter(!is.na(SSS_group)) %>%
+  dplyr::group_by(SSS_group, bin) %>%
+  dplyr::summarise(
+    mean_rt = mean(.data[[rt_metric]], na.rm = TRUE),
+    sd_rt   = sd(.data[[rt_metric]],   na.rm = TRUE),
+    n_subj  = dplyr::n_distinct(id),
+    se_rt   = sd_rt / sqrt(n_subj),
+    .groups = "drop"
+  )
+
+fig.SSSRT <- ggplot(rtCurve.SSS,
+                          aes(x = bin, y = mean_rt,
+                              group = SSS_group, color = SSS_group, fill = SSS_group)) +
+  geom_ribbon(aes(ymin = pmax(0, mean_rt - se_rt),
+                  ymax = mean_rt + se_rt),
+              alpha = 0.18, color = NA) +
+  geom_line() +
+  geom_point() +
+  scale_color_manual(values = pal.SSS) +
+  scale_fill_manual(values = pal.SSS) +
+  labs(
+    x = "Trial Bin",
+    y = "log(RT)",
+    title = "log(RT) by Median Splits",
+    color = "SS",
+    fill = "SS"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top")
+
+rtCurve.BIS <- df.RT %>%
+  dplyr::filter(!is.na(BIS_group)) %>%
+  dplyr::group_by(BIS_group, bin) %>%
+  dplyr::summarise(
+    mean_rt = mean(.data[[rt_metric]], na.rm = TRUE),
+    sd_rt   = sd(.data[[rt_metric]],   na.rm = TRUE),
+    n_subj  = dplyr::n_distinct(id),
+    se_rt   = sd_rt / sqrt(n_subj),
+    .groups = "drop"
+  )
+
+fig.BISRT <- ggplot(rtCurve.BIS,
+                          aes(x = bin, y = mean_rt,
+                              group = BIS_group, color = BIS_group, fill = BIS_group)) +
+  geom_ribbon(aes(ymin = pmax(0, mean_rt - se_rt),
+                  ymax = mean_rt + se_rt),
+              alpha = 0.18, color = NA) +
+  geom_line() +
+  geom_point() +
+  scale_color_manual(values = pal.BIS) +
+  scale_fill_manual(values = pal.BIS) +
+  labs(
+    x = "Trial Bin",
+    y = "log(RT)",
+    title = "log(RT) by Median Splits",
+    color = "IP",
+    fill = "IP"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top")
+
+```
+
+## Look at choiceFreq
+Exploratory analysis
+```{r HighVar-HigHInt}
+choice.stimFreq <- pTable_by_bin %>%
+  dplyr::left_join(df.questionnaire, by = c("Subject","id")) %>%
+  # first create raw
+  mutate(
+    norm_term = V1 + V2 + V3 + V4 + V5 + V6,
+    p15_raw = (V1 + V2)/norm_term,
+    p50_raw = (V3 + V4)/norm_term,
+    p85_raw = (V5 + V6)/norm_term
+  ) %>%
+  # then normalized (using raw cols)
+  mutate(
+    p15_norm = p15_raw - ((p50_raw + p85_raw) / 2),
+    p50_norm = p50_raw - ((p15_raw + p85_raw) / 2),
+    p85_norm = p85_raw - ((p15_raw + p50_raw) / 2)
+  ) %>%
+  pivot_longer(
+    cols = c(p15_raw, p50_raw, p85_raw, p15_norm, p50_norm, p85_norm),
+    names_to = c("pStim", "Type"),
+    names_pattern = "p(\\d{2})_(raw|norm)"
+  ) %>%
+  mutate(
+    pStim = paste0("0.", pStim),
+    #pStim = factor(pStim, levels = c("0.15", "0.50", "0.85")),
+    pStim = as.numeric(pStim),
+    Subject = as.factor(Subject),
+    id  = as.factor(id),
+    bin = factor(bin, levels = sort(unique(bin))),   # ensure 1,2,3,4 order
+    zSSS = as.numeric(scale(SSS)),
+    zBIS = as.numeric(scale(BIS))
+  ) %>%
+  tidyr::drop_na(value, id, bin, zSSS, zBIS)
+
+df.highVarianceChoice <- choice.stimFreq %>%
+  dplyr::filter(pStim==0.5, Type=="raw")
+
+df.highIntensityChoice <- choice.stimFreq %>%
+  dplyr::filter(pStim==0.85, Type=="raw")
+
+pop.highVarianceChoice <- df.highVarianceChoice %>%
+  group_by(bin) %>%
+  dplyr::summarise(meanValue = mean(value, na.rm = TRUE),
+                   se = sd(value, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop")
+
+
+
+m_sss_varFreq <- lm(value ~ bin * zSSS, data = df.highVarianceChoice)
+m_bis_varFreq <- lm(value ~ bin * zBIS, data = df.highVarianceChoice)
+
+m_sss_IntFreq <- lm(value ~ bin * zSSS, data = df.highIntensityChoice)
+m_bis_IntFreq <- lm(value ~ bin * zBIS, data = df.highIntensityChoice)
+
+```
+
+
+## Look at p(repeat)
+Exploratory analysis
+```{r pChoice=Repeat}
+
+p_repeat <- function(choices) {
+  choices <- as.vector(choices)
+  mean(choices[-1] == choices[-length(choices)], na.rm = TRUE)
+}
+
+p_switch <- function(choices) 1 - p_repeat(choices)
+
+pRepeat_by_round <- df.choice %>%
+  arrange(Subject, id, Round, Trial) %>%
+  group_by(Subject, id, Round) %>%
+  mutate(
+    observed   = bin.choiceMat > 0,
+    prev_choice= dplyr::lag(bin.choiceMat),
+    prev_trial = dplyr::lag(Trial),
+    prev_obs   = dplyr::lag(observed),
+    # only count transitions where BOTH are observed AND consecutive trials
+    contiguous = observed & prev_obs & (Trial - prev_trial == 1),
+    repeat_adj = contiguous & (bin.choiceMat == prev_choice)
+  ) %>%
+  summarise(
+    n_trans = sum(contiguous, na.rm = TRUE),         # valid adjacent transitions
+    n_repeat= sum(repeat_adj,  na.rm = TRUE),
+    p_repeat= ifelse(n_trans > 0, n_repeat / n_trans, NA_real_),
+    .groups = "drop"
+  )
+
+pRepeat_by_sub <- pRepeat_by_round %>%
+  group_by(Subject, id) %>%
+  summarise(
+    n_trans_tot = sum(n_trans),
+    n_repeat_tot= sum(n_repeat),
+    p_repeat    = ifelse(n_trans_tot > 0, n_repeat_tot / n_trans_tot, NA_real_),
+    .groups = "drop"
+  ) %>%
+  left_join(df.questionnaire, by = c("Subject","id")) %>%
+  mutate(
+    id  = as.factor(id),
+    zSSS = as.numeric(scale(SSS)),
+    zBIS = as.numeric(scale(BIS))
+  )
+
+
+tmp <- lm(p_repeat ~ zSSS*zBIS,data = pRepeat_by_sub)
+
+
+pRepeat_by_round_bandit <- df.choice %>%
+  arrange(Subject, id, Round, Trial) %>%
+  group_by(Subject, id, Round) %>%
+  mutate(
+    observed   = choice > 0,
+    prev_choice= dplyr::lag(choice),
+    prev_trial = dplyr::lag(Trial),
+    prev_obs   = dplyr::lag(observed),
+    # only count transitions where BOTH are observed AND consecutive trials
+    contiguous = observed & prev_obs & (Trial - prev_trial == 1),
+    repeat_adj = contiguous & (choice == prev_choice)
+  ) %>%
+  summarise(
+    n_trans = sum(contiguous, na.rm = TRUE),         # valid adjacent transitions
+    n_repeat= sum(repeat_adj,  na.rm = TRUE),
+    p_repeat= ifelse(n_trans > 0, n_repeat / n_trans, NA_real_),
+    .groups = "drop"
+  )
+
+pRepeat_by_sub <- pRepeat_by_round_bandit %>%
+  group_by(Subject, id) %>%
+  summarise(
+    n_trans_tot = sum(n_trans),
+    n_repeat_tot= sum(n_repeat),
+    p_repeat    = ifelse(n_trans_tot > 0, n_repeat_tot / n_trans_tot, NA_real_),
+    .groups = "drop"
+  ) %>%
+  left_join(df.questionnaire, by = c("Subject","id")) %>%
+  mutate(
+    id  = as.factor(id),
+    zSSS = as.numeric(scale(SSS)),
+    zBIS = as.numeric(scale(BIS))
+  )
+
+pRepeat_by_sub <- pRepeat_by_round_bandit %>%
+  group_by(Subject, id) %>%
+  summarise(p_repeat = mean(p_repeat, na.rm = TRUE), .groups = "drop") %>%
+  left_join(df.questionnaire, by = c("Subject","id")) %>%
+  mutate(
+    id  = as.factor(id),
+    zSSS = as.numeric(scale(SSS)),
+    zBIS = as.numeric(scale(BIS))
+  )
+
+tmp <- lm(p_repeat ~ zSSS*zBIS,data = pRepeat_by_sub)
+```
+
+## Look at mixed effect regressions 
+
+
+```{r regression_choice, echo=FALSE}
+library(performance)
+
+
+scale2_nocenter <- function(x) x / (2 * stats::sd(x, na.rm = TRUE))
+
+df.regression <- df.choice %>%
+  dplyr::mutate(choiceRight = bin.choiceMat - 1) %>%
+  dplyr::left_join(df.questionnaire, by = c("Subject","id")) %>% 
+  # Need to scale
+  dplyr::mutate(
+    logRT = log(rt/1000),
+    zSSS = scale(SSS),
+    zBIS = scale(BIS),
+    #dRmu = scale2_nocenter(dRmu),
+    #dSsig = scale2_nocenter(dSsig),
+    #dSmu = scale2_nocenter(dSmu),
+    #dMotorSticky = scale2_nocenter(dMotorSticky)
+  ) %>%
+  dplyr::filter(bin.choiceMat > 0) #remove missed trials
+
+# First I compare between different types of perseveration
+
+modelFixed.noSticky <- glm(choiceRight ~ dRmu + dSsig + dSmu, 
+                           data=df.regression,family = binomial) 
+
+modelFixed.Motor <- glm(choiceRight ~ dRmu + dSsig + dSmu + dMotorSticky, 
+                        data=df.regression,family = binomial) 
+
+modelFixed.Bandit <- glm(choiceRight ~ dRmu + dSsig + dSmu + dBanditSticky, 
+                         data=df.regression,family = binomial)
+perserveration.compare <- compare_performance(modelFixed.Bandit, modelFixed.Motor,modelFixed.noSticky)
+# Motor perseveration wins
+
+modelBase.Fixed <- modelFixed.Motor
+
+modelBase.Intercept <- glmer(choiceRight ~ dRmu + dSsig + dSmu + dMotorSticky + 
+                               (1  |id),
+                             data=df.regression,family = binomial) 
+
+modelBase.Mixed <- glmer(choiceRight ~ dRmu + dSsig + dSmu + dMotorSticky + 
+                           (1 + dRmu |id),
+                         data=df.regression,family = binomial) 
+
+# Here, just to double check if motor perseveration really wins
+modelBase.Mixed.Bandit <- glmer(choiceRight ~ dRmu + dSsig + dSmu + dBanditSticky + 
+                                  (1 + dRmu |id),
+                                data=df.regression,family = binomial) 
+
+modelBase.compare <- compare_performance(modelBase.Fixed, modelBase.Intercept, modelBase.Mixed)
+
+# Here modelBase.Mixed Wins!
+
+# ------- Interaction with traits
+
+model.TraitInteraction <- glmer(choiceRight ~ dRmu + dSsig + dMotorSticky + 
+                                  dRmu:zSSS + dRmu:zBIS + dRmu:zSSS:zBIS +
+                                  dSsig:zSSS + dSsig:zBIS + dSsig:zSSS:zBIS +
+                                  dMotorSticky:zSSS + dMotorSticky:zBIS + dMotorSticky:zSSS:zBIS +
+                                  (1 + dRmu |id),
+                                data=df.regression,family = binomial) 
+
+
+#First I want to plot all the significant beta weights
+
+plot_model(model.TraitInteraction, type = "pred",
+           terms = c("dSsig [all]", "zSSS [-2,2]", "zBIS [-2,2]"),
+           ci.lvl = 0.95, pred.type = "fe")
+
+
+
+# -------- Then I want to plot the psychometric curves
+################################
+
+library(emmeans)
+
+# dRmu slope at SSS×BIS grid
+tr_Rmu <- emtrends(model.TraitInteraction, ~ zSSS * zBIS, var = "dRmu",
+                   at = list(zSSS = c(-1,0,1), zBIS = c(-1,0,1)))
+summary(tr_Rmu)                     # slope (log-odds) + CI
+pairs(tr_Rmu, by = "zSSS")          # compare BIS levels within SSS
+pairs(tr_Rmu, by = "zBIS")          # compare SSS levels within BIS
+
+# dSsig slope
+tr_Ssig <- emtrends(model.TraitInteraction, ~ zSSS * zBIS, var = "dSsig",
+                    at = list(zSSS = c(-1,0,1), zBIS = c(-1,0,1)))
+summary(tr_Ssig)
+pairs(tr_Ssig, by = "zSSS")          # compare BIS levels within SSS
+pairs(tr_Ssig, by = "zBIS")          # compare SSS levels within BIS
+
+
+library(sjPlot)
+
+plot_model(
+  tmp, 
+  type = "pred",
+  terms = c("dSsig[all]", "zSSS", "zBIS")
+)
+
+sjPlot::plot_model(tmp, type = "re")
+
+summary(tmp)
+
+
+## --------------- Plot SS X IP X Ssig  Interaction
+
+
+gSSS <- seq(min(df.regression$zSSS-0.2, na.rm=TRUE),
+            max(df.regression$zSSS+0.2, na.rm=TRUE), length.out = 100)
+gBIS <- seq(min(df.regression$zBIS-0.2, na.rm=TRUE),
+            max(df.regression$zBIS+0.2, na.rm=TRUE), length.out = 100)
+
+tr_Ssig <- emtrends(
+  model.TraitInteraction,
+  ~ zSSS * zBIS, var = "dSsig",
+  at = list(zSSS = gSSS, zBIS = gBIS),
+  mode = "latent"
+)
+tr_df <- summary(tr_Ssig, infer = TRUE) |> as.data.frame()
+trend_col <- grep("\\.trend$", names(tr_df), value = TRUE)
+
+tr_df <- tr_df |>
+  dplyr::rename(slope = dplyr::all_of(trend_col),
+                p = p.value) |>
+  dplyr::mutate(sig = p < 0.05)
+
+# observed points to overlay 
+xlim <- range(gSSS); ylim <- range(gBIS)
+pts_raw <- df.regression |>
+  dplyr::select(zSSS, zBIS) |>
+  tidyr::drop_na() |>
+  dplyr::filter(zSSS >= xlim[1], zSSS <= xlim[2],
+                zBIS >= ylim[1], zBIS <= ylim[2])
+
+# OPTIONAL: per-subject centroids (reduces overplotting)
+pts_id <- df.regression |>
+  dplyr::group_by(id) |>
+  dplyr::summarise(zSSS = mean(zSSS, na.rm = TRUE),
+                   zBIS = mean(zBIS, na.rm = TRUE),
+                   .groups = "drop") |>
+  dplyr::filter(zSSS >= xlim[1], zSSS <= xlim[2],
+                zBIS >= ylim[1], zBIS <= ylim[2])
+
+# --- plot: raster + sig contour + observed points ----------------------------
+library(dplyr)
+library(ggplot2)
+
+# symmetric limits around 0 for the diverging palette
+L <- max(abs(tr_df$slope), na.rm = TRUE)
+
+# clip observed points to grid extent
+xlim <- range(tr_df$zSSS, na.rm = TRUE)
+ylim <- range(tr_df$zBIS, na.rm = TRUE)
+pts_raw <- df.regression %>%
+  select(zSSS, zBIS) %>%
+  tidyr::drop_na() %>%
+  filter(zSSS >= xlim[1], zSSS <= xlim[2],
+         zBIS >= ylim[1], zBIS <= ylim[2])
+
+fig.Ssig_3way <- ggplot(tr_df, aes(zSSS, zBIS)) +
+  # raster: color = slope, alpha = significance
+  geom_raster(aes(fill = slope, alpha = sig)) +
+  # thin dashed boundary of significant region (optional)
+  geom_contour(aes(z = as.numeric(sig)), breaks = 0.5,
+               colour = "black", linetype = "dashed", linewidth = 0.5) +
+  geom_contour(aes(z = as.numeric(slope)), breaks = 0.5,
+               colour = "black", linetype = "dashed", linewidth = 0.5) +
+  
+  # observed points with subtle halo
+  #geom_point(data = pts_raw, aes(zSSS, zBIS),
+  #           inherit.aes = FALSE, color = "white", size = 0.7, alpha = 0.30) +
+  #geom_point(data = pts_raw, aes(zSSS, zBIS),
+  #           inherit.aes = FALSE, color = "black", size = 0.7, alpha = 0.15) +
+  #
+  geom_point(shape=4,data = pts_id, aes(zSSS, zBIS),
+             inherit.aes = FALSE, shape = 21, #fill = "white",
+             color = "grey80", size = 1, stroke = 0.9) +
+  
+  #scale_fill_gradient2(
+  #  low = "#005f73", mid = "white", high = "#ae2012",
+  #  midpoint = 0, limits = c(-L, L), name = "∂logitP/∂dSσ"
+  #) +
+  
+  #stat_density_2d(
+  #  data = pts_id,
+  #  aes(x = zSSS, y = zBIS),
+  #  contour_var = "ndensity",
+  #  #breaks = c(0.5, 0.8, 0.95,1),   # 50%, 80%, 95% utilization contours
+  #  colour = "white", linewidth = 0.5
+  #) +
+  
+  scale_fill_viridis_c(name = "Slope of ΔS\u03c3",option = "magma") +
+  scale_alpha_manual(values = c(`FALSE` = 0.25, `TRUE` = 1), guide = "none") +
+  coord_cartesian(xlim = xlim, ylim = ylim, expand = FALSE) +
+  labs(x = expression("SS (z-score)"), y = expression("IP (z-score)"),
+       title = "Conditional Slope of ΔS\u03c3 on P(Choice = Right)",
+       #subtitle = "Solid colors: p < .05; faint tiles: n.s.; points = observed (zSSS, zBIS)") 
+  )+
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top")
+
+
+library(dplyr)
+library(ggplot2)
+
+# --- choose contour levels (include 0 explicitly) -----------------------------
+slope_range  <- range(tr_df$slope, na.rm = TRUE)
+slope_breaks <- sort(unique(c(0, pretty(slope_range, n = 5))))
+
+# --- where to place the "non-significant" label -------------------------------
+xlim <- range(tr_df$zSSS, na.rm = TRUE)
+ylim <- range(tr_df$zBIS, na.rm = TRUE)
+
+ns_label <- tr_df %>%
+  filter(!sig,
+         between(zSSS, xlim[1], xlim[2]),
+         between(zBIS, ylim[1], ylim[2])) %>%
+  summarise(x = median(zSSS, na.rm = TRUE),
+            y = median(zBIS, na.rm = TRUE),
+            .groups = "drop")
+
+# optional: symmetric colour limits around 0 for a diverging palette
+L <- max(abs(tr_df$slope), na.rm = TRUE)
+
+fig.Ssig_3way <- ggplot(tr_df, aes(zSSS, zBIS)) +
+  # raster: colour = slope; alpha = significance
+  geom_raster(aes(fill = slope, alpha = sig)) +
+
+  # boundary of significant region (sig TRUE/FALSE -> 1/0; 0.5 is the border)
+  geom_contour(aes(z = as.numeric(sig)),
+               breaks = 0.5, colour = "black",
+               linetype = "dashed", linewidth = 0.5) +
+
+  # slope contours (thin) + a thicker 0-slope isocline
+  geom_contour(aes(z = slope),
+               breaks = slope_breaks,
+               colour = "black", linewidth = 0.3, alpha = 0.8) +
+  #geom_contour(aes(z = slope),
+  #             breaks = 0,
+  #             colour = "black", linewidth = 0.8) +
+
+  # observed subject centroids
+  geom_point(data = pts_id, aes(zSSS, zBIS),
+             inherit.aes = FALSE,
+             shape = 21, colour = "grey70", size = 1, stroke = 0.9) +
+
+  # colour & alpha scales
+  # (option A: perceptual; option B (commented) diverging with symmetric limits)
+  scale_fill_viridis_c(name = "Slope of ΔS\u03C3", option = "magma") +
+  # scale_fill_gradient2(low = "#005f73", mid = "white", high = "#ae2012",
+  #                      midpoint = 0, limits = c(-L, L),
+  #                      name = "Slope of ΔS\u03C3") +
+  scale_alpha_manual(values = c(`FALSE` = 0.25, `TRUE` = 1), guide = "none") +
+
+  coord_cartesian(xlim = xlim, ylim = ylim, expand = FALSE) +
+  labs(x = expression("SS (z-score)"),
+       y = expression("IP (z-score)"),
+       title = "Conditional Slope of ΔS\u03C3 on P(Choice = Right)") +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top")
+
+# add a label for the non-significant area (if any present)
+if (nrow(ns_label) == 1 &&
+    is.finite(ns_label$x) && is.finite(ns_label$y)) {
+  fig.Ssig_3way <- fig.Ssig_3way +
+    annotate("text",
+             x = ns_label$x, y = ns_label$y,
+             label = "n.s",
+             size = 3.5, fontface = "italic", colour = "grey30")
+}
+
+fig.Ssig_3way
+
+library(metR)
+fig.Ssig_3way +
+  metR::geom_text_contour(aes(z = slope),
+                          breaks = slope_breaks,
+                          size = 3, check_overlap = TRUE)
+
+
+
+## -----------------  Model diagnostics
+
+
+library(DHARMa)
+res <- simulateResiduals(model.TraitInteraction, n = 1000)
+plot(res)                    # uniformity + residual vs predicted
+testDispersion(res)          # over/under-dispersion
+testZeroInflation(res)  
+
+# By-participant (grouped) residual diagnostics
+res_id <- recalculateResiduals(res, group = df.regression$id)
+plot(res_id)
+testDispersion(res_id)
+
+
+
+
+#Plot random effects and slops
+p <- plot_model(
+  model.TraitInteraction,
+  type = "re",          # random effects caterpillar
+  sort.est = TRUE,      # optional, sorts within facet
+  show.values = FALSE,
+  transform = NULL
+)
+
+p
+
+# 1) Remove the crowded subject labels/ticks
+p <- p +
+  theme_classic(base_size = 12) +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        strip.text   = element_text(size = 12, face = "bold")) +
+  labs(y = NULL, x = "Subject ID", title = "Conditional Intercept + Slopes")
+
+# 2) Rename the facet strip labels by recoding the existing facet variable
+#    (for sjPlot 'type="re"', this column is usually `term` — check with names(p$data))
+names(p$data)         # look for 'term'; if different, change below accordingly
+unique(p$data$facet)
+
+p$data <- p$data %>%
+  mutate(facet = recode(facet,
+                        "id (Intercept)" = "Intercept",
+                        "dRmu"        = "Reward Slope"))
+
+p
+
+# numeric estimate for correaltiopon between inctercept and slops
+
+vc <- VarCorr(model.TraitInteraction)
+attr(vc$id, "correlation")   # matrix with intercept–slope correlation
+
+# quick plot
+re <- as.data.frame(ranef(model.TraitInteraction)$id)  # BLUPs (deviations)
+names(re)  # should include "(Intercept)" and "dRmu"
+
+library(ggplot2)
+ggplot(re, aes(`(Intercept)`, dRmu)) +
+  geom_point(alpha = .35) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  labs(x = "Random intercept (log-odds deviation)",
+       y = "Random slope for ΔRμ (deviation)",
+       title = "Intercept–slope correlation by subject") +
+  theme_classic()
+cor.test(re$`(Intercept)`, re$dRmu, use = "complete.obs")
+```
+## Plots for trait GLMM
+This block is for Figure 4
+```{r tmp}
+library(broom.mixed)
+library(dplyr)
+library(forcats)
+library(stringr)
+library(ggplot2)
+
+
+m <- model.TraitInteraction
+cat::vif(m)
+m <- modelBase.Mixed
+alpha <- 0.05
+
+rename_term <- function(x) {
+  x |>
+    str_replace_all("dRmu",         "ΔR\u03bc") |>
+    str_replace_all("dSmu",        "ΔS\u03bc") |>
+    str_replace_all("dSsig",        "ΔS\u03c3") |>
+    str_replace_all("dMotorSticky", "Motor\nStickiness") |>
+    str_replace_all("zSSS",         "SS") |>
+    str_replace_all("zBIS",         "IP") |>
+    str_replace_all(":",            " × ")
+}
+
+# --- tidy + (optional) filter -------------------------------------------------
+fx <- tidy(m, effects = "fixed", conf.int = TRUE, conf.method = "Wald") %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    p_adj = p.value,                 # or p.adjust(p.value, "BH")
+    label = rename_term(term)
+  )
+
+fx_keep <- fx #if (any(fx$p_adj < alpha, na.rm = TRUE)) filter(fx, p_adj < alpha) else fx
+
+#fx_keep <- fx %>% filter(term=="dSsig:zBIS")
+
+# --- build plotting df (β, not OR) -------------------------------------------
+fx_plot <- fx_keep %>%
+  transmute(
+    term, label,
+    beta = estimate,
+    lo   = conf.low,
+    hi   = conf.high,
+    sign = if_else(beta >= 0, "Positive", "Negative")
+  )
+
+# --- manual order (top → bottom) ---------------------------------------------
+wanted_terms <- c(
+  "dRmu","dSmu","dSsig","dMotorSticky",
+  "dRmu:zSSS", "dRmu:zBIS","dRmu:zSSS:zBIS",
+  "dSsig:zSSS","dSsig:zBIS","dSsig:zSSS:zBIS",
+  "dMotorSticky:zSSS","dMotorSticky:zBIS","dMotorSticky:zSSS:zBIS"
+)
+
+
+
+wanted_labels <- rename_term(wanted_terms)
+# keep only labels that actually appear after filtering
+wanted_labels <- wanted_labels[wanted_labels %in% fx_plot$label]
+
+# y-axis draws bottom→top; put desired top items at the END of levels (or use rev)
+fx_plot <- fx_plot %>%
+  mutate(label = factor(label, levels = rev(wanted_labels)))  # top matches first in wanted_terms
+
+# --- plot --------------------------------------------------------------------
+cols <- c("Negative" = "#AE2012", "Positive" = "#005F73")
+
+library(ggbreak)
+
+
+ggplot(fx_plot, aes(x = beta, y = label, colour = sign)) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.15, linewidth = 1.0) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "red") +
+  scale_color_manual(values = cols, guide = "none") +
+  theme_classic(base_size = 12) +
+  labs(title = "Trait-interaction model — fixed effects (β)",
+       x = "Coefficient (β)", y = NULL) +
+  # cut out the dead space between ~0.8 and ~3.0 (tune these)
+  scale_x_break(c(0.2, 3.1), space = 0.2) +
+  # optionally also cut the far right tail if needed
+  scale_x_break(c(-1.5, -0.5), space = 0.2) 
+
+
+# For insets
+ggplot(fx_plot, aes(x = beta, y = 1, colour = sign)) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.01, linewidth = 1.0, width = 0) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "red") +
+  scale_color_manual(values = cols, guide = "none") +
+  theme_classic(base_size = 25) +
+  labs(
+    title = (fx_plot$label[1]),   # use the label as the plot title
+    x     = "Coefficient (β)",
+    y     = NULL                # no y-axis title
+  ) +
+  theme(
+    axis.text.y  = element_blank(),  # hide y tick label
+    axis.ticks.y = element_blank(),   # hide y tick
+    plot.title   = element_text(hjust = 0.5)  # center title
+  )
+
+# For base model
+ggplot(fx_plot, aes(x = beta, y = label, colour = sign)) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.15, linewidth = 1.0) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "red") +
+  scale_color_manual(values = cols, guide = "none") +
+  theme_classic(base_size = 12) +
+  labs(title = "Mixed Effects Regression — fixed effects (β)",
+       x = "Coefficient (β)", y = NULL) #+
+  # cut out the dead space between ~0.8 and ~3.0 (tune these)
+  scale_x_break(c(0.2, 3.1), space = 0.2) +
+  # optionally also cut the far right tail if needed
+  scale_x_break(c(-1.5, -0.1), space = 0.2) 
+
+
+library(ggforce)
+
+ggplot(fx_plot, aes(x = beta, y = label, colour = sign)) +
+  geom_errorbar(aes(xmin = lo, xmax = hi), orientation = "y", width = 0.15, linewidth = 1) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = cols, guide = "none") +
+  labs(title = "Fixed effects (β)", x = "Coefficient (β)", y = NULL) +
+  theme_classic(base_size = 12) +
+  ggforce::facet_zoom(x = beta > 0.2 & beta < 3.1, horizontal = TRUE)
+
+
+library(ggplot2)
+library(ggforce)
+library(grid)
+
+p <- ggplot(fx_plot, aes(x = beta, y = label, colour = sign)) +
+  geom_errorbar(
+    aes(xmin = lo, xmax = hi),
+    orientation = "y",           # replaces errorbarh in ggplot2 >= 4
+    width = 0.15,
+    linewidth = 1
+  ) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = cols, guide = "none") +
+  labs(title = "Fixed effects (\u03B2)", x = "Coefficient (\u03B2)", y = NULL) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.margin   = margin(8, 8, 8, 8, unit = "pt"),
+    panel.spacing = unit(6, "pt"),      # make sure this is a unit, not numeric
+    axis.ticks.length = unit(4, "pt")   # likewise
+  )
+
+# Use xlim instead of an expression; often avoids the unit error
+p + ggforce::facet_zoom(xlim = c(-0.01, 0.2), horizontal = TRUE, zoom.size = 0.6)
+
+
+# --- Time for the conditional slopes at different trait levels
+
+col.SSS <- "#ee9b00"
+col.BIS <- "#0A9396"
+
+# compute mean ± 2 SD once (for clean legend labels)
+mf     <- model.frame(model.TraitInteraction)
+mSSS   <- mean(mf$zSSS, na.rm = TRUE); sSSS <- sd(mf$zSSS, na.rm = TRUE)
+mBIS   <- mean(mf$zBIS, na.rm = TRUE); sBIS <- sd(mf$zBIS, na.rm = TRUE)
+sss_terms <- sprintf("zSSS [%.3f,%.3f]", mSSS - 2*sSSS, mSSS + 2*sSSS)
+bis_terms <- sprintf("zBIS [%.3f,%.3f]", mBIS - 2*sBIS, mBIS + 2*sBIS)
+
+g <- ggpredict(model.TraitInteraction, terms = c("dRmu[all]", sss_terms))
+
+# Make clean group labels (assumes two groups = −1 SD and +1 SD, sorted low→high)
+lvls <- sort(unique(g$group))
+g$group <- factor(g$group, levels = lvls,
+                  labels = c("Low", "High"))
+
+cols_sss <- c("Low" = scales::alpha(col.SSS, 0.85),
+              "High" = col.SSS)
+
+ggplot(g, aes(x = x, y = predicted,
+              color = group, fill = group, linetype = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = cols_sss, guide = guide_legend(title = NULL)) +
+  scale_fill_manual(values  = cols_sss, guide = "none") +
+  scale_linetype_manual(values = c("Low" = "dashed", "High" = "solid"),
+                        guide = "none") +
+  labs(title = "Reward × SS interaction",
+       x = "ΔReward", y = "P(Choice = Right)") +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "top")
+
+
+
+# Reward x SS
+g <- ggpredict(model.TraitInteraction, terms = c("dRmu[all]", sss_terms))
+lvls <- sort(unique(g$group))
+g$group <- factor(g$group, levels = lvls, labels = c("Low", "High"))
+cols <- c("Low" = scales::alpha(col.SSS, 0.25), "High" = col.SSS)
+
+p_Rmu_SS <- ggplot(g, aes(x = x, y = predicted, color = group, fill = group, linetype = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = cols, guide = guide_legend(title = NULL)) +
+  scale_fill_manual(values  = cols, guide = "none") +
+  scale_linetype_manual(values = c("Low" = "dashed", "High" = "solid"), guide = "none") +
+  labs(title = "ΔR\u03bc × SS Interaction", x = "ΔR\u03bc", y = "P(Choice = Right)") +
+  theme_classic(base_size = 12) + theme(legend.position = "top")
+
+p_Rmu_SS <- ggplot(g, aes(x=x,y=predicted,fill="#ee9b00")) +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high,alpha=group,),color=NA) +
+  geom_line(aes(color="#ee9b00",linetype=group),size=1.2) +
+  theme_classic() +
+  labs(title="ΔR\u03bc × SS Interaction",x="ΔR\u03bc", y = "P(Choice = Right)") +
+  scale_alpha_manual(values=c(0.25,0.65),guide=F,name="SS",labels = c("Low", "High")) +
+  scale_linetype_manual(values = c("dotted","solid"),name="SS",labels = c("Low", "High")) +
+  scale_colour_manual(values = c("#ee9b00", "#ee9b00"),name="SS",labels = c("Low", "High"),guide=F) +
+  scale_fill_manual(values = c("#ee9b00", "#ee9b00"),name="SS",labels = c("Low", "High"),guide=F) +
+  ylim(0,1) +
+  #theme(legend.position=c(1,1), legend.justification = c(1,1),text=element_text(size=12)) +
+  theme(legend.position='top',text=element_text(size=12)) +
+  geom_hline(yintercept = 0.5, linetype="dashed", color="#AE2012", size=1)
+
+
+
+# Rewards X IP
+
+g <- ggpredict(model.TraitInteraction, terms = c("dRmu[all]", bis_terms))
+lvls <- sort(unique(g$group))
+g$group <- factor(g$group, levels = lvls, labels = c("Low", "High"))
+cols <- c("Low" = scales::alpha(col.BIS, 0.25), "High" = col.BIS)
+
+p_Rmu_IP <- ggplot(g, aes(x=x,y=predicted,fill="#0A9396")) +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high,alpha=group,),color=NA) +
+  geom_line(aes(color="#0A9396",linetype=group),size=1.2) +
+  theme_classic() +
+  labs(title="ΔR\u03bc × IP Interaction",x="ΔR\u03bc", y = "P(Choice = Right)") +
+  scale_alpha_manual(values=c(0.25,0.65),guide=F,name="IP",labels = c("Low", "High")) +
+  scale_linetype_manual(values = c("dotted","solid"),name="IP",labels = c("Low", "High")) +
+  scale_colour_manual(values = c("#0A9396", "#0A9396"),name="IP",labels = c("Low", "High"),guide=F) +
+  scale_fill_manual(values = c("#0A9396", "#0A9396"),name="IP",labels = c("Low", "High"),guide=F) +
+  ylim(0,1) +
+  #theme(legend.position=c(1,1), legend.justification = c(1,1),text=element_text(size=12)) +
+  theme(legend.position='top',text=element_text(size=12)) +
+  geom_hline(yintercept = 0.5, linetype="dashed", color="#AE2012", size=1)
+
+
+#Uncertainty X ss
+g <- ggpredict(model.TraitInteraction, terms = c("dSsig[all]", sss_terms))
+lvls <- sort(unique(g$group))
+g$group <- factor(g$group, levels = lvls, labels = c("Low", "High"))
+cols <- c("Low" = scales::alpha(col.SSS, 0.85), "High" = col.SSS)
+
+p_Ssig_SS <- ggplot(g, aes(x = x, y = predicted, color = group, fill = group, linetype = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = cols, guide = guide_legend(title = NULL)) +
+  scale_fill_manual(values  = cols, guide = "none") +
+  scale_linetype_manual(values = c("Low" = "dashed", "High" = "solid"), guide = "none") +
+  labs(title = "ΔStim Uncertainty × SS interaction", x = "ΔStim Uncertainty", y = "P(Choice = Right)") +
+  theme_classic(base_size = 12) + theme(legend.position = "top")
+
+
+p_Ssig_SS <- ggplot(g, aes(x=x,y=predicted,fill="#ee9b00")) +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high,alpha=group,),color=NA) +
+  geom_line(aes(color="#ee9b00",linetype=group),size=1.2) +
+  theme_classic() +
+  labs(title="ΔS\u03c3 × SS Interaction", x= "ΔS\u03c3", y = "P(Choice = Right)") +
+  scale_alpha_manual(values=c(0.25,0.65),guide=F,name="SS",labels = c("Low", "High")) +
+  scale_linetype_manual(values = c("dotted","solid"),name="SS",labels = c("Low", "High")) +
+  scale_colour_manual(values = c("#ee9b00", "#ee9b00"),name="SS",labels = c("Low", "High"),guide=F) +
+  scale_fill_manual(values = c("#ee9b00", "#ee9b00"),name="SS",labels = c("Low", "High"),guide=F) +
+  ylim(0,1) +
+  #theme(legend.position=c(1,1), legend.justification = c(1,1),text=element_text(size=12)) +
+  theme(legend.position='top',text=element_text(size=12)) +
+  geom_hline(yintercept = 0.5, linetype="dashed", color="#AE2012", size=1)
+
+#Uncertainty X IP
+g <- ggpredict(model.TraitInteraction, terms = c("dSsig[all]", bis_terms))
+lvls <- sort(unique(g$group))
+g$group <- factor(g$group, levels = lvls, labels = c("Low", "High"))
+cols <- c("Low" = scales::alpha(col.BIS, 0.85), "High" = col.BIS)
+
+p_Ssig_BIS <- ggplot(g, aes(x = x, y = predicted, color = group, fill = group, linetype = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = cols, guide = guide_legend(title = NULL)) +
+  scale_fill_manual(values  = cols, guide = "none") +
+  scale_linetype_manual(values = c("Low" = "dashed", "High" = "solid"), guide = "none") +
+  labs(title = "ΔStim Uncertainty × IP interaction", x = "ΔStim Uncertainty", y = "P(Choice = Right)") +
+  theme_classic(base_size = 12) + theme(legend.position = "top")
+
+p_Ssig_BIS <- ggplot(g, aes(x=x,y=predicted,fill="#0A9396")) +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high,alpha=group,),color=NA) +
+  geom_line(aes(color="#0A9396",linetype=group),size=1.2) +
+  theme_classic() +
+  labs(title="ΔS\u03c3 × IP Interaction", x= "ΔS\u03c3", y = "P(Choice = Right)") +
+  scale_alpha_manual(values=c(0.25,0.65),guide=F,name="SS",labels = c("Low", "High")) +
+  scale_linetype_manual(values = c("dotted","solid"),name="IP",labels = c("Low", "High")) +
+  scale_colour_manual(values = c("#0A9396", "#0A9396"),name="IP",labels = c("Low", "High"),guide=F) +
+  scale_fill_manual(values = c("#0A9396", "#0A9396"),name="IP",labels = c("Low", "High"),guide=F) +
+  ylim(0,1) +
+  #theme(legend.position=c(1,1), legend.justification = c(1,1),text=element_text(size=12)) +
+  theme(legend.position='top',text=element_text(size=12)) +
+  geom_hline(yintercept = 0.5, linetype="dashed", color="#AE2012", size=1)
+
+
+#Motor
+g <- ggpredict(model.TraitInteraction, terms = c("dMotorSticky[all]", sss_terms))
+lvls <- sort(unique(g$group))
+g$group <- factor(g$group, levels = lvls, labels = c("Low", "High"))
+cols <- c("Low" = scales::alpha(col.SSS, 0.85), "High" = col.SSS)
+
+p_Motor_SS <- ggplot(g, aes(x = x, y = predicted, color = group, fill = group, linetype = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = cols, guide = guide_legend(title = NULL)) +
+  scale_fill_manual(values  = cols, guide = "none") +
+  scale_linetype_manual(values = c("Low" = "dashed", "High" = "solid"), guide = "none") +
+  labs(title = "Motor stickiness × SS interaction", x = "Motor stickiness", y = "P(Choice = Right)") +
+  theme_classic(base_size = 12) + theme(legend.position = "top")
+
+p_Motor_SS <- ggplot(g, aes(x=x,y=predicted,fill="#ee9b00")) +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high,alpha=group,),color=NA) +
+  geom_line(aes(color="#ee9b00",linetype=group),size=1.2) +
+  theme_classic() +
+  labs(title="Motor × SS Interaction",x="Motor Stickiness", y = "P(Choice = Right)") +
+  scale_alpha_manual(values=c(0.25,0.65),guide=F,name="SS",labels = c("Low", "High")) +
+  scale_linetype_manual(values = c("dotted","solid"),name="SS",labels = c("Low", "High")) +
+  scale_colour_manual(values = c("#ee9b00", "#ee9b00"),name="SS",labels = c("Low", "High"),guide=F) +
+  scale_fill_manual(values = c("#ee9b00", "#ee9b00"),name="SS",labels = c("Low", "High"),guide=F) +
+  ylim(0.45,0.55) +
+  #theme(legend.position=c(1,1), legend.justification = c(1,1),text=element_text(size=12)) +
+  theme(legend.position='top',text=element_text(size=12)) +
+  geom_hline(yintercept = 0.5, linetype="dashed", color="#AE2012", size=1)
+
+g <- ggpredict(model.TraitInteraction, terms = c("dMotorSticky[all]", bis_terms))
+lvls <- sort(unique(g$group))
+g$group <- factor(g$group, levels = lvls, labels = c("Low", "High"))
+cols <- c("Low" = scales::alpha(col.BIS, 0.85), "High" = col.BIS)
+
+p_Motor_BIS <- ggplot(g, aes(x = x, y = predicted, color = group, fill = group, linetype = group)) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = cols, guide = guide_legend(title = NULL)) +
+  scale_fill_manual(values  = cols, guide = "none") +
+  scale_linetype_manual(values = c("Low" = "dashed", "High" = "solid"), guide = "none") +
+  labs(title = "Motor stickiness × BIS interaction", x = "Motor stickiness", y = "P(Choice = Right)") +
+  theme_classic(base_size = 12) + theme(legend.position = "top")
+
+p_Motor_BIS <- ggplot(g, aes(x=x,y=predicted,fill="#0A9396")) +
+  geom_ribbon(aes(ymin=conf.low, ymax=conf.high,alpha=group,),color=NA) +
+  geom_line(aes(color="#0A9396",linetype=group),size=1.2) +
+  theme_classic() +
+  labs(title="Motor × BIS interaction", x= "Motor stickiness", y = "P(Choice = Right)") +
+  scale_alpha_manual(values=c(0.25,0.65),guide=F,name="SS",labels = c("Low", "High")) +
+  scale_linetype_manual(values = c("dotted","solid"),name="IP",labels = c("Low", "High")) +
+  scale_colour_manual(values = c("#0A9396", "#0A9396"),name="IP",labels = c("Low", "High"),guide=F) +
+  scale_fill_manual(values = c("#0A9396", "#0A9396"),name="IP",labels = c("Low", "High"),guide=F) +
+  ylim(0.45,0.55) +
+  #theme(legend.position=c(1,1), legend.justification = c(1,1),text=element_text(size=12)) +
+  theme(legend.position='top',text=element_text(size=12)) +
+  geom_hline(yintercept = 0.5, linetype="dashed", color="#AE2012", size=1)
+
+
+
+
+```
+
+## Model Based analysis
+```{r stanPlots}
+# Load model fits from results folder + extract loo-ic
+fits <- list.files("results", pattern = ".stan.fit")
+
+for (fit in 1:length(fits)){
+  print(paste("Loading",fits[fit]))
+  #Initilise LOOIC and LOOIC.se as empty list
+  if (fit <= 1) {LOOIC <- list(); LOOIC.se <-list(); subLOO <- array(NA, dim=c(nSub,length(fits)))}
+  #Load model fit from results directory
+  model <- readRDS(paste0("results/", fits[fit]))
+  assign(fits[fit], model)
+  
+  # Extract fit files and assign dynamically
+  extracted_fit <- rstan::extract(model)
+  assign(paste0("ex.", fits[fit]), extracted_fit)
+  
+  #Create loo file for model comparision
+  loo_fit <- loo::loo(model)
+  assign(paste0("loo.", fits[fit]), loo_fit)
+  
+  #Extract LOO-IC
+  LOOIC[fit] <- loo_fit$estimates[3]
+  LOOIC.se[fit] <- loo_fit$estimates[6]
+  
+  #Extract subject loo
+  subLOO[,fit] <- loo_fit$pointwise[,4] 
+}
+
+#Clean fitss
+fits <- gsub("^HBM_|\\.stan\\.fit\\.rds$", "", fits)
+
+axis_lab_map <- setNames(
+  fits %>%
+    stringr::str_replace_all("ThetaOmega",   "R-\u03B8\u03C9") %>%              # R - θω
+    stringr::str_replace_all("Theta",        "R-\u03B8") %>%                    # R - θ
+    stringr::str_replace_all("Omega",        "R-\u03C9") %>%                    # R - ω
+    stringr::str_replace_all("Reward",       "R-only") %>%
+    stringr::str_replace_all("BanditSticky", "R-\u03B8\u03C9\u03C1\u209B") %>% # R - θωρₛ
+    stringr::str_replace_all("MotorSticky",  "R-\u03B8\u03C9\u03C1\u2098") %>% # R - θωρₘ
+    stringr::str_replace_all("_", " + "),
+  fits
+)
+
+#Create dataFrame for model comparision with LOO-IC
+df.MC <- data.frame(fit_file =fits,
+                    loo.ic = unlist(LOOIC),
+                    loo.ic.se = unlist(LOOIC.se)) %>% arrange(desc(loo.ic))
+
+# Subject-level long df
+df.subLOO <- as.data.frame(subLOO)
+colnames(df.subLOO) <- fits
+df.subLOO$Subject <- factor(1:nSub)
+df.long <- df.subLOO %>%
+  pivot_longer(-Subject, names_to = "Model", values_to = "elpd_loo") %>%
+  mutate(Model = as.character(Model))
+
+# Set baseline model
+baseline_model <- fits[2]
+
+# Ensure df.long$Model is character
+df.long <- df.long %>%
+  mutate(Model = as.character(Model))
+
+# Compute subject-level delta from baseline
+df.delta <- df.long %>%
+  group_by(Subject) %>%
+  mutate(delta_elpd = elpd_loo - elpd_loo[Model == baseline_model][1]) %>%
+  ungroup()
+
+# Summarize mean delta and SE per model
+df.MC.delta <- df.delta %>%
+  group_by(Model) %>%
+  summarise(
+    delta_mean = mean(delta_elpd),
+    delta_se = sd(delta_elpd) / sqrt(n()),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(delta_mean))
+
+# Plot like original, now using delta
+model_order <- df.MC.delta$Model
+
+fig.ModelDelta <- ggplot(
+  df.MC.delta,
+  aes(x = factor(Model, levels = model_order), y = delta_mean, colour = Model)
+) +
+  geom_point(size = 4, position = position_dodge(width = 0.9)) +
+  geom_errorbar(
+    aes(ymin = delta_mean - delta_se, ymax = delta_mean + delta_se),
+    width = 0.2, linewidth = 1.1, position = position_dodge(0.9)
+  ) +
+  #scale_x_discrete(labels = axis_lab_map) +     # axis_lab_map has plain strings/Unicode
+  scale_x_discrete(
+  labels = c(
+    "ThetaOmega"   = expression(R - theta*omega),
+    "Theta"        = expression(R - theta),
+    "Omega"        = expression(R - omega),
+    "Reward"       = "R-only",
+    "BanditSticky" = expression(R - theta*omega*rho[s]),
+    "MotorSticky"  = expression(R - theta*omega*rho[m])
+  )
+)+
+  scale_color_brewer(palette = "Dark2", name = "Model") +
+  labs(
+    title = "Model Comparison (Relative to Best Fit)",
+    x = NULL,
+    y = "ΔLOOIC (lower is better)"
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 12),
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 12)
+  ) +
+  geom_hline(yintercept = 0,linetype="dashed", color ="#AE2012" )
+
+  
+
+fig.ModelDelta
+
+
+#fig.ModelComparison <- ggplot(df.MC, aes(x=factor(fit_file,level=fit_file), y=loo.ic, colour=fits)) + 
+#  theme_classic() +
+#  geom_point(stat="identity", position=position_dodge(),size=4) +
+#  geom_errorbar(aes(ymin=loo.ic-loo.ic.se, ymax=loo.ic+loo.ic.se), width=.2,size=1.5,position=position_dodge(.9)) +
+#  ggtitle("Bayesian Model Comparison")+
+#  xlab("Model")+
+#  ylab("LOOIC (lower is better)") +
+#  theme(legend.position = 'none',text=element_text(size=20),axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1, size =1)) +
+#  #scale_colour_manual(values = c("#0070c0","#cc79a7", "#019e73","black","black"))
+#scale_x_discrete(labels = axis_lab_map)
+
+#fig.ModelComparison
+
+```
+
+```{r associations}
+
+models <- list(
+  Reward    = readRDS("results/HBM_Reward.stan.fit.rds"),
+  Theta   = readRDS("results/HBM_Theta.stan.fit.rds"),
+  Omega   = readRDS("results/HBM_Omega.stan.fit.rds"),
+  ThetaOmega  = readRDS("results/HBM_ThetaOmega.stan.fit.rds"),
+  BanditSticky= readRDS("results/HBM_BanditSticky.stan.fit.rds"),
+  MotorSticky= readRDS("results/HBM_MotorSticky.stan.fit.rds")
+)
+
+
+# ---- helper: pull posterior means for a base name (vector params) ----
+pmatch_stan_vec <- function(fit, base) {
+  if (!inherits(fit, "stanfit")) return(NULL)
+  PM <- rstan::get_posterior_mean(fit)        # all params, no filtering
+  rn <- rownames(PM)
+  idx <- grep(paste0("^", base, "\\["), rn)   # matches base like "theta[1]"
+  if (length(idx) == 0) return(NULL)
+  as.numeric(PM[idx, ncol(PM)])               # last col = mean across chains
+}
+
+# ---- list-like fallback (if your RDS is a list of matrices) ----
+colmeans_if_mat <- function(x) {
+  if (is.null(x)) return(NULL)
+  as.numeric(colMeans(as.matrix(x)))
+}
+
+# ---- robust extractor for one model (works for stanfit or list) ----
+extract_params_one <- function(fit, model_label) {
+  th <- om <- kp <- ta <- NULL
+
+  if (inherits(fit, "stanfit")) {
+    th <- pmatch_stan_vec(fit, "theta")
+    om <- pmatch_stan_vec(fit, "omega")
+    kp <- pmatch_stan_vec(fit, "kappa")
+
+    # tau may be stored as tau, inv_tau, or tau_inv
+    ta_dir  <- pmatch_stan_vec(fit, "tau")
+    ta_inv1 <- pmatch_stan_vec(fit, "inv_tau")
+    ta_inv2 <- pmatch_stan_vec(fit, "tau_inv")
+    if (!is.null(ta_dir))      ta <- ta_dir
+    else if (!is.null(ta_inv1)) ta <- 1 / ta_inv1
+    else if (!is.null(ta_inv2)) ta <- 1 / ta_inv2
+
+  } else if (is.list(fit)) {
+    th <- colmeans_if_mat(fit$theta)
+    om <- colmeans_if_mat(fit$omega)
+    kp <- colmeans_if_mat(fit$kappa)
+    ta <- colmeans_if_mat(fit$tau)
+    if (is.null(ta) && !is.null(fit$inv_tau)) ta <- 1 / colmeans_if_mat(fit$inv_tau)
+    if (is.null(ta) && !is.null(fit$tau_inv)) ta <- 1 / colmeans_if_mat(fit$tau_inv)
+  }
+
+  n <- max(c(length(th), length(om), length(kp), length(ta), 0))
+  if (n == 0) return(tibble())  # nothing available in this model
+
+  tibble(
+    id    = seq_len(n),
+    theta = if (length(th)) th else NA_real_,
+    omega = if (length(om)) om else NA_real_,
+    kappa = if (length(kp)) kp else NA_real_,
+    tau   = if (length(ta)) ta else NA_real_,
+    model = model_label
+  )
+}
+
+# ---- build the long DF safely (skips missing params per model) ----
+df_all <- imap_dfr(models, extract_params_one)
+
+present <- c("theta","omega","kappa","tau")[colSums(!is.na(df_all[, c("theta","omega","kappa","tau")])) > 0]
+
+# ---- plot ----
+
+library(ggh4x)
+
+par_order <- c("tau","theta","omega", "kappa") 
+df_long <- df_all %>%
+  tidyr::pivot_longer(cols = all_of(present), names_to = "param", values_to = "value") %>%
+  dplyr::filter(!is.na(value)) %>%
+  dplyr::mutate(
+    # choose your transform for tau (this is log; use 1/value if you prefer inverse)
+    value_plot = ifelse(param == "tau", pmax(1/value, .Machine$double.eps), value),
+    
+    param = factor(param, levels = par_order[par_order %in% param]),
+
+    # facet-column labels as plotmath strings
+    param_lab = dplyr::recode(param,
+      theta = "theta",
+      omega = "omega",
+      kappa = "rho[s/m]",
+      tau   = "tau"
+    ),
+
+    # facet-row labels as plotmath strings (order must match names(models))
+    model = factor(model, levels = names(models), labels = c(
+      "R - ~ 'Only'",                  # R-Only
+      "R - ~ theta",                   # R-θ
+      "R - ~ omega",                   # R-ω
+      "R - ~ theta*omega",             # R-θω
+      "R - ~ theta*omega*rho[s]",      # R-θωρ_s
+      "R - ~ theta*omega*rho[m]"       # R-θωρ_m
+    ))
+  )
+
+
+ggplot(df_long, aes(x = value_plot)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 40, fill = "#0a9396", color = "black", alpha = 0.7, linewidth = 0.3) +
+  geom_density(color = "#ca6702", linewidth = 1) +
+  ggh4x::facet_grid2(
+    rows  = vars(model),
+    cols  = vars(param_lab),
+    scales = "free",
+    independent = "all",
+    switch = "both",
+    labeller = labeller(model = label_parsed, param_lab = label_parsed)  # << parse θ, ω, ρ_s, …
+  ) +
+  labs(x = "Fitted value (log for \u03C4)", y = "Density",
+       title = "Distribution of Fitted Parameters Across All Models") +
+  theme_classic(base_size = 12) +
+  theme(strip.placement = "outside",
+        strip.background = element_rect(fill = NA, colour = NA),
+        panel.grid.minor = element_blank(),
+        panel.spacing = unit(0.8, "lines"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+```
+
+
+```{r associations}
+library(ggcorrplot)
+winModel <- ex.HBM_MotorSticky.stan.fit.rds
+
+df.modelParams <- data.frame(
+                             theta=colMeans(winModel$theta),
+                             omega=colMeans(winModel$omega),
+                             kappa=colMeans(winModel$kappa),
+                             inv_tau = colMeans(winModel$tau),
+                             tau=1/colMeans(winModel$tau) # change from inverse temperature to temperature
+                             
+                             ) %>%
+                mutate(log_tau = log(tau),
+                       log_inv_tau = log(inv_tau),
+                       e_omega = scale(omega*tau),
+                       e_theta = scale(theta*tau),
+                       #theta_omega = theta/omega,
+                       #to_sum = abs(theta) + abs(omega),
+                       #diff_theta_omega = theta - omega
+                       ) #change to monotonic due to skeweddistribution
+
+plot_histograms(df.modelParams,c("theta", "omega", "log_tau","kappa"))
+
+df.modelParams.long <- df.modelParams %>%
+    dplyr::select(all_of(c("theta", "omega", "tau","kappa"))) %>%
+    pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+  # Create the plot
+ggplot(df.modelParams.long, aes(x = Value)) +
+    geom_histogram(aes(y = ..density..), bins = 40, fill = "#0a9396", color = "black", alpha = 0.7) +  # Histogram
+    geom_density(color = "#ca6702", size = 1) +  # Density curve overlay
+    facet_wrap(
+    vars(forcats::fct_relevel(Variable, "theta", "omega", "tau" , "kappa")),
+    scales = "free", ncol = 2,
+    labeller = as_labeller(c(
+      theta   = "\u03B8 (Intensity Weight)",        # θ
+      omega   = "\u03C9 (Uncertainty Weight)",        # ω
+      tau = "\u03C4 (Temperature)",     # log τ
+      kappa = "\u03C1 (Motor Stickiness)"
+      
+    ))
+  ) +
+    labs(
+      title = paste("Subject-specific posterior parameter estimates"),
+      x = "Value",
+      y = "Density"
+    ) +
+    theme_classic(base_size = 12) +
+    theme(
+      plot.title = element_text(),
+      axis.title.x = element_text(size = 12),
+      axis.title.y = element_text(size = 12),
+      axis.text = element_text(size = 12),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(size = 12)
+    ) + theme(strip.background = element_blank())
+
+
+
+
+df.association <- bind_cols(df.questionnaire, df.modelParams)
+
+
+df_corMat <- df.association %>%
+  select(where(is.numeric)) %>%
+  select(where(~ sum(is.finite(.)) >= 3)) %>%
+  select(where(~ sd(., na.rm = TRUE) > 0))
+cormat <- cor(df_corMat, use = "pairwise.complete.obs", method = "pearson")
+
+p.mat <- ggcorrplot::cor_pmat(df_corMat)
+
+
+ggcorrplot(
+  cormat,
+  type = "lower",          # show lower triangle
+  hc.order = TRUE,         # reorder by clustering
+  lab = TRUE,              # show r values on tiles
+  lab_size = 2.6,
+  p.mat = p.mat,           # significance matrix
+  insig = "blank",         # hide non-significant cells
+  outline.color = "white",
+  show.legend = TRUE
+) +
+  ggtitle("Correlation matrix")
+
+```
+
+
+## Regression of Traits with Model Parameters and their Interactions
+```{r plot_betas}
+
+df_assoc <- df.association %>%
+  mutate(
+    gender = as.factor(gender),
+    across(c(s_SSS, s_omega, s_theta, s_log_tau, s_kappa, s_BIS, s_IQ, s_age), as.numeric)
+  )
+
+label_map_base <- c(
+  "s_omega"                   = "ω",
+  "s_theta"                   = "θ",
+  "s_log_tau"                 = "log τ",
+  "s_kappa"                   = "ρ",
+  "s_omega:s_theta"           = "ω × θ",
+  "s_omega:s_log_tau"         = "ω × log τ",
+  "s_theta:s_log_tau"         = "θ × log τ",
+  "s_omega:s_theta:s_log_tau" = "ω × θ × log τ",
+  "s_BIS"                     = "IP",
+  "s_IQ"                      = "IQ",
+  "s_age"                     = "Age",
+  "s_SSS"                     = "SS"
+)
+label_lookup <- function(x, map) {
+  out <- map[x]; out[is.na(out)] <- x[is.na(out)]; unname(out)
+}
+
+# Colors for positive/negative betas
+cols_sign <- c("Negative" = "#AE2012", "Positive" = "#005F73")
+
+
+# Sensation Seeking 
+form_base_SSS <- s_SSS ~ gender + s_BIS + s_IQ + s_age + s_log_tau + s_omega * s_theta
+form_full_SSS <- s_SSS ~ gender + s_BIS + s_IQ + s_age + s_omega * s_theta * s_log_tau + s_kappa
+
+model_base_SSS <- lm(form_base_SSS, data = df_assoc)
+model_full_SSS <- lm(form_full_SSS, data = df_assoc)
+
+
+alpha <- 0.05
+coef_table_SSS <- broom::tidy(model_full_SSS) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(p_adj = p.adjust(p.value, method = "BH"))
+
+sig_terms_SSS <- coef_table_SSS %>%
+  #filter(p.value < alpha) %>%
+  pull(term)
+if (length(sig_terms_SSS) == 0) sig_terms_SSS <- coef_table_SSS$term
+
+params_terms <- c("s_omega","s_theta","s_log_tau")
+
+covariate_terms_SSS <- c("gender1","s_BIS","s_IQ","s_age")
+
+plot_terms_SSS <- unique(c(sig_terms_SSS,params_terms,covariate_terms_SSS))
+
+gender_terms_SSS <- grep("^gender", names(coef(model_full_SSS)), value = TRUE)
+label_map_SSS <- label_map_base
+if (length(gender_terms_SSS)) {
+  label_map_SSS <- c(
+    label_map_SSS,
+    setNames(paste0("Gender: ", sub("^gender", "", gender_terms_SSS)), gender_terms_SSS)
+  )
+}
+
+plot_df_SSS <- sjPlot::get_model_data(model_full_SSS, type = "est", terms = plot_terms_SSS) %>%
+  dplyr::mutate(
+    term_chr = as.character(term),                   # <-- avoid factor indexing bugs
+    sign     = dplyr::if_else(estimate >= 0, "Positive", "Negative"),
+    label    = dplyr::recode(term_chr, !!!label_map_SSS, .default = term_chr)
+  )
+
+manual_order_SSS <- c(
+  "s_omega", "s_theta", "s_log_tau", "s_kappa",
+  "s_omega:s_theta", "s_omega:s_log_tau", "s_theta:s_log_tau",
+  "s_omega:s_theta:s_log_tau", "s_BIS", "s_IQ", "s_age", "gender1"
+)
+
+manual_order_SSS <- rev(manual_order_SSS)
+
+plot_df_SSS <- plot_df_SSS %>%
+  mutate(
+    term  = factor(term,  levels = manual_order_SSS),
+    label = factor(label, levels = label_lookup(manual_order_SSS, label_map_SSS))
+  )
+
+
+plot_SSS <- ggplot(plot_df_SSS, aes(y = label, x = estimate, colour = sign)) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.15, linewidth = 1.0) +  # brackets via height
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  scale_color_manual(values = cols_sign, guide = "none") +
+  theme_classic(base_size = 12) +
+  labs(title = "Predictors of SS",
+       x = "Coefficient (\u03B2)", y = "Predictor")
+
+plot_SSS
+
+
+## Impulsivitiy
+
+form_base_BIS <- s_BIS ~ gender + s_SSS + s_IQ + s_age + s_log_tau + s_omega * s_theta
+form_full_BIS <- s_BIS ~ gender + s_SSS + s_IQ + s_age + s_omega * s_theta * s_log_tau + s_kappa
+
+# --- Fit models --------------------------------------------------------------
+model_base_BIS <- lm(form_base_BIS, data = df_assoc)
+model_full_BIS <- lm(form_full_BIS, data = df_assoc)
+
+coef_table_BIS <- broom::tidy(model_full_BIS) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(p_adj = p.adjust(p.value, method = "BH"))
+
+sig_terms_BIS <- coef_table_BIS %>%
+#  filter(p.value < alpha) %>%
+  pull(term)
+if (length(sig_terms_BIS) == 0) sig_terms_BIS <- coef_table_BIS$term
+
+covariate_terms_BIS <- c("gender1","s_SSS","s_IQ","s_age")
+
+plot_terms_BIS <- unique(c(sig_terms_BIS, params_terms, covariate_terms_BIS))
+
+gender_terms_BIS <- grep("^gender", names(coef(model_full_BIS)), value = TRUE)
+label_map_BIS <- label_map_base
+if (length(gender_terms_BIS)) {
+  label_map_BIS <- c(
+    label_map_BIS,
+    setNames(paste0("Gender: ", sub("^gender", "", gender_terms_BIS)), gender_terms_BIS)
+  )
+}
+
+
+plot_df_BIS <- sjPlot::get_model_data(model_full_BIS, type = "est", terms = plot_terms_BIS) %>%
+   dplyr::mutate(
+    term_chr = as.character(term),                   # <-- avoid factor indexing bugs
+    sign     = dplyr::if_else(estimate >= 0, "Positive", "Negative"),
+    label    = dplyr::recode(term_chr, !!!label_map_BIS, .default = term_chr)
+   )
+
+manual_order_BIS <- c(
+  "s_omega", "s_theta", "s_log_tau", "s_kappa",
+  "s_omega:s_theta", "s_omega:s_log_tau", "s_theta:s_log_tau",
+  "s_omega:s_theta:s_log_tau", "s_SSS", "s_IQ", "s_age", "gender1"
+)
+
+manual_order_BIS <- rev(manual_order_BIS)
+
+plot_df_BIS <- plot_df_BIS %>%
+  mutate(
+    term  = factor(term,  levels = manual_order_BIS),
+    label = factor(label, levels = label_lookup(manual_order_BIS, label_map_BIS))
+  )
+
+
+plot_BIS <- ggplot(plot_df_BIS, aes(y = label, x = estimate, colour = sign)) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high),
+                 height = 0.15, linewidth = 1.0) +  # brackets via height
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  scale_color_manual(values = cols_sign, guide = "none") +
+  theme_classic(base_size = 12) +
+  labs(title = "Predictors of IP",
+       x = "Coefficient (\u03B2)", y = "Predictor")
+
+```
+
+
+```{r omega-theta_fanplots_SS}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(emmeans)
+
+
+n_theta  <- 25
+n_omega  <- 60
+
+g_theta <- seq(min(d$s_theta, na.rm = TRUE), max(d$s_theta, na.rm = TRUE), length.out = n_theta)
+g_omega <- seq(min(d$s_omega, na.rm = TRUE), max(d$s_omega, na.rm = TRUE), length.out = n_omega)
+
+# --- Choose model/outcome (EDIT THESE TWO LINES ONLY) ------------------------
+model       <- model_full_SSS       # or m3_BIS
+outcome_var <- "s_SSS"      # or "s_BIS"
+
+# --- Simple slope of ω across θ at τ = 0 -------------------------------------
+tr <- emtrends(
+  model,
+  specs = ~ s_theta,   # θ is the moderator; condition on τ
+  var   = "s_omega",
+  at    = list(s_theta = g_theta),
+  cov.reduce = mean                   # averages numeric covariates, incl. s_log_tau
+)
+
+tr0 <- summary(tr, infer = TRUE) |> as.data.frame()
+trend_col <- names(tr0)[grepl("\\.trend$", names(tr0))]
+stopifnot(length(trend_col) == 1)
+
+tr_df <- tr0 |>
+  transmute(
+    s_theta,
+    slope   = .data[[trend_col]],
+    p       = p.value,
+    sig     = p < 0.05,
+    sig_lab = ifelse(sig, "p < .05", "n.s.")
+  )
+
+# --- Prediction grid over ω × θ (hold covariates at typical values) ----------
+nd <- expand_grid(s_omega = g_omega, s_theta = g_theta) |>
+  mutate(
+    s_log_tau = mean(d$s_log_tau, na.rm = TRUE),
+    gender = if (is.factor(d$gender)) levels(d$gender)[1] else unique(d$gender)[1],
+    s_SSS  = mean(d$s_SSS, na.rm = TRUE),
+    s_BIS  = mean(d$s_BIS, na.rm = TRUE),
+    s_IQ   = mean(d$s_IQ,  na.rm = TRUE),
+    s_age  = mean(d$s_age, na.rm = TRUE)
+  ) |>
+  left_join(tr_df, by = "s_theta")
+
+nd$yhat <- predict(model, newdata = nd)
+
+# --- Observed points near τ = 0 ----------------------------------------------
+pts <- d |>
+  transmute(s_omega, s_theta, y = .data[[outcome_var]])
+
+# --- Fan plot (θ colour: blue -> red; solid lines where slope is significant) -
+ggplot() +
+  geom_point(data = pts, aes(s_omega, y, color = s_theta),
+             alpha = 1, size = 1.6) +
+  geom_line(data = nd, aes(s_omega, yhat, group = s_theta,
+                           color = s_theta, linetype = sig_lab),
+            linewidth = 0.5) +
+  scale_color_gradient2(
+    name = "θ (moderator)",
+    low = "#005F73", mid = "grey90", high = "#AE2012",
+    limits = range(d$s_theta, na.rm = TRUE),
+    oob = scales::squish
+  )+
+  scale_linetype_manual(values = c("n.s." = "dotted", "p < .05" = "solid"),
+                        name = "Simple slope of ω") +
+  labs(
+    x = "ω",
+    y = paste("Predicted / observed SS"),
+    title = paste0("SS ~ ω across θ")
+  ) +
+  theme_classic(base_size = 12)
+
+
+
+
+# Now I want to plot the effect of log_tau on SSS to visualise the partial correlation
+
+x  <- "s_log_tau"                 # predictor
+y  <- "s_SSS"                     # outcome
+control_vars <- c("gender", "s_BIS", "s_IQ", "s_age", "s_omega", "s_theta")
+method <- "pearson"               # or "spearman"
+
+point_color <- "#ee9b00"
+line_color  <- "#ca6702"
+title_text  <- "Partial Correlation: SS ~ log τ"
+
+vars_needed <- c(x, y, control_vars)
+df_cc <- df_assoc %>%
+  dplyr::select(dplyr::all_of(vars_needed)) %>%
+  tidyr::drop_na()
+
+if ("gender" %in% control_vars && !is.factor(df_cc$gender)) {
+  df_cc$gender <- as.factor(df_cc$gender)
+}
+
+
+if (length(control_vars) > 0) {
+  # residuals from OLS with the SAME controls used for pcor
+  lm_x <- lm(reformulate(control_vars, x), data = df_cc)
+  lm_y <- lm(reformulate(control_vars, y), data = df_cc)
+
+  resid_x <- scale(resid(lm_x))  # scaling doesn't change r
+  resid_y <- scale(resid(lm_y))
+
+  # build a numeric control matrix that matches the above controls (dummy-code factors)
+  # model.matrix(~ controls) gives intercept + dummies; drop the intercept:
+  mm_controls <- model.matrix(reformulate(control_vars), data = df_cc)
+  mm_controls <- as.data.frame(mm_controls[, -1, drop = FALSE])
+
+  # pcor with identical control set (now includes factor dummies)
+  pcor_res <- ppcor::pcor.test(df_cc[[x]], df_cc[[y]], mm_controls, method = method)
+  rho  <- round(pcor_res$estimate, 3)
+  pval <- pcor_res$p.value
+} else {
+  # no controls: simple correlation
+  resid_x <- scale(df_cc[[x]])
+  resid_y <- scale(df_cc[[y]])
+  ct <- cor.test(df_cc[[x]], df_cc[[y]], method = method)
+  rho  <- round(unname(ct$estimate), 3)
+  pval <- ct$p.value
+}
+
+# Cohen’s d from r
+d_val <- (2 * rho) / sqrt(1 - rho^2)
+p_lbl <- ifelse(pval < .001, "< .001", sprintf("= %.3f", pval))
+sub_txt <- sprintf("ρ = %.3f | p %s | d = %.3f", rho, p_lbl, d_val)
+
+# ---------------------- plot residual–residual (added-variable) ---------------
+plot_df <- data.frame(resid_x = drop(resid_x), resid_y = drop(resid_y))
+
+ggplot(plot_df, aes(resid_x, resid_y)) +
+  geom_point(size = 2.2, color = point_color, alpha = 0.55) +
+  geom_smooth(method = "lm", se = TRUE, color = line_color, fill = line_color, alpha = 0.15) +
+  theme_classic(base_size = 12) +
+  labs(
+    title = title_text,
+    subtitle = sub_txt,
+    x = paste("log τ"),
+    y = paste("SS")
+  )
+
+
+
+```
+
+
+
+
+```{r omega-theta_fanplots_IP}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(emmeans)
+
+
+n_theta  <- 20
+n_omega  <- 60
+
+g_theta <- seq(min(d$s_theta, na.rm = TRUE), max(d$s_theta, na.rm = TRUE), length.out = n_theta)
+g_omega <- seq(min(d$s_omega, na.rm = TRUE), max(d$s_omega, na.rm = TRUE), length.out = n_omega)
+
+# --- Choose model/outcome (EDIT THESE TWO LINES ONLY) ------------------------
+model       <- model_full_BIS       # or m3_BIS
+outcome_var <- "s_BIS"      # or "s_BIS"
+
+# --- Simple slope of ω across θ at τ = 0 -------------------------------------
+tr <- emtrends(
+  model,
+  specs = ~ s_theta,   # θ is the moderator; condition on τ
+  var   = "s_omega",
+  at    = list(s_theta = g_theta),
+  cov.reduce = mean                   # averages numeric covariates, incl. s_log_tau
+)
+
+tr0 <- summary(tr, infer = TRUE) |> as.data.frame()
+trend_col <- names(tr0)[grepl("\\.trend$", names(tr0))]
+stopifnot(length(trend_col) == 1)
+
+tr_df <- tr0 |>
+  transmute(
+    s_theta,
+    slope   = .data[[trend_col]],
+    p       = p.value,
+    sig     = p < 0.05,
+    sig_lab = ifelse(sig, "p < .05", "n.s.")
+  )
+
+# --- Prediction grid over ω × θ (hold covariates at typical values) ----------
+nd <- expand_grid(s_omega = g_omega, s_theta = g_theta) |>
+  mutate(
+    s_log_tau = mean(d$s_log_tau, na.rm = TRUE),
+    gender = if (is.factor(d$gender)) levels(d$gender)[1] else unique(d$gender)[1],
+    s_SSS  = mean(d$s_SSS, na.rm = TRUE),
+    s_BIS  = mean(d$s_BIS, na.rm = TRUE),
+    s_IQ   = mean(d$s_IQ,  na.rm = TRUE),
+    s_age  = mean(d$s_age, na.rm = TRUE)
+  ) |>
+  left_join(tr_df, by = "s_theta")
+
+nd$yhat <- predict(model, newdata = nd)
+
+# --- Observed points near τ = 0 ----------------------------------------------
+pts <- d |>
+  transmute(s_omega, s_theta, y = .data[[outcome_var]])
+
+# --- Fan plot (θ colour: blue -> red; solid lines where slope is significant) -
+ggplot() +
+  geom_point(data = pts, aes(s_omega, y, color = s_theta),
+             alpha = 1, size = 1.6) +
+  geom_line(data = nd, aes(s_omega, yhat, group = s_theta,
+                           color = s_theta, linetype = sig_lab),
+            linewidth = 0.5) +
+  scale_color_gradient2(
+    name = "θ",
+    low = "#005F73", mid = "grey90", high = "#AE2012",
+    limits = range(d$s_theta, na.rm = TRUE),
+    oob = scales::squish
+  )+
+  scale_linetype_manual(values = c("n.s." = "dashed", "p < .05" = "solid"),
+                        name = "Simple slope of ω", guide="none") +
+  labs(
+    x = "ω",
+    y = paste("Predicted / observed IP"),
+    title = paste0("IP ~ ω across θ (moderator)")
+  ) +
+  theme_classic(base_size = 12)
+
+#"#E9D8A6","#E9D8A6","#E9D8A6",
+#low = "#005F73", mid = "grey90", high = "#AE2012",
+
+```
+
+# Combined Fanplots
+Code for Figure 4
+```{r tmptmp}
+
+library(emmeans)
+
+n_theta  <- 20
+n_omega  <- 60
+g_theta  <- seq(min(d$s_theta, na.rm = TRUE), max(d$s_theta, na.rm = TRUE), length.out = n_theta)
+g_omega  <- seq(min(d$s_omega, na.rm = TRUE), max(d$s_omega, na.rm = TRUE), length.out = n_omega)
+
+# SS
+model_SSS <- model_full_SSS
+tr_SSS <- emtrends(
+  model_SSS,
+  specs = ~ s_theta,
+  var   = "s_omega",
+  at    = list(s_theta = g_theta),
+  cov.reduce = mean
+)
+tr0_SSS <- summary(tr_SSS, infer = TRUE) |> as.data.frame()
+trend_col_SSS <- names(tr0_SSS)[grepl("\\.trend$", names(tr0_SSS))]
+tr_df_SSS <- tr0_SSS |>
+  transmute(
+    s_theta,
+    slope   = .data[[trend_col_SSS]],
+    p       = p.value,
+    sig     = p < 0.05,
+    sig_lab = ifelse(sig, "p < .05", "n.s.")
+  )
+
+nd_SSS <- expand_grid(s_omega = g_omega, s_theta = g_theta) |>
+  mutate(
+    s_log_tau = mean(d$s_log_tau, na.rm = TRUE),
+    gender = if (is.factor(d$gender)) levels(d$gender)[1] else unique(d$gender)[1],
+    s_SSS  = mean(d$s_SSS, na.rm = TRUE),
+    s_BIS  = mean(d$s_BIS, na.rm = TRUE),
+    s_IQ   = mean(d$s_IQ,  na.rm = TRUE),
+    s_age  = mean(d$s_age, na.rm = TRUE)
+  ) |>
+  left_join(tr_df_SSS, by = "s_theta") |>
+  mutate(outcome = "SS")
+nd_SSS$yhat <- predict(model_SSS, newdata = nd_SSS)
+
+pts_SSS <- d |>
+  transmute(s_omega, s_theta, y = s_SSS, outcome = "SS")
+
+# BIS
+model_BIS <- model_full_BIS
+tr_BIS <- emtrends(
+  model_BIS,
+  specs = ~ s_theta,
+  var   = "s_omega",
+  at    = list(s_theta = g_theta),
+  cov.reduce = mean
+)
+tr0_BIS <- summary(tr_BIS, infer = TRUE) |> as.data.frame()
+trend_col_BIS <- names(tr0_BIS)[grepl("\\.trend$", names(tr0_BIS))]
+tr_df_BIS <- tr0_BIS |>
+  transmute(
+    s_theta,
+    slope   = .data[[trend_col_BIS]],
+    p       = p.value,
+    sig     = p < 0.05,
+    sig_lab = ifelse(sig, "p < .05", "n.s.")
+  )
+
+nd_BIS <- expand_grid(s_omega = g_omega, s_theta = g_theta) |>
+  mutate(
+    s_log_tau = mean(d$s_log_tau, na.rm = TRUE),
+    gender = if (is.factor(d$gender)) levels(d$gender)[1] else unique(d$gender)[1],
+    s_SSS  = mean(d$s_SSS, na.rm = TRUE),
+    s_BIS  = mean(d$s_BIS, na.rm = TRUE),
+    s_IQ   = mean(d$s_IQ,  na.rm = TRUE),
+    s_age  = mean(d$s_age, na.rm = TRUE)
+  ) |>
+  left_join(tr_df_BIS, by = "s_theta") |>
+  mutate(outcome = "IP")                                    # facet label for BIS
+nd_BIS$yhat <- predict(model_BIS, newdata = nd_BIS)
+
+pts_BIS <- d |>
+  transmute(s_omega, s_theta, y = s_BIS, outcome = "IP")
+
+# Combine and plot
+nd_all  <- bind_rows(nd_SSS, nd_BIS) %>%
+  dplyr::mutate(outcome = factor(outcome, levels = c("SS", "IP")))
+
+pts_all <- bind_rows(pts_SSS, pts_BIS) %>%
+  mutate(outcome = factor(outcome,
+                          levels = c("SS", "IP"),
+                          ordered = TRUE))
+
+mid_theta <- mean(d$s_theta, na.rm = TRUE)
+
+ggplot() +
+  geom_point(data = pts_all, aes(s_omega, y),
+             color = "#3F3F3F", alpha = .6, size = 0.8) +
+  geom_line(
+    data = nd_all,
+    aes(s_omega, yhat,
+        group = interaction(outcome, s_theta),
+        color = s_theta,
+        linetype = sig_lab,
+        linewidth = sig_lab),
+    lineend = "round"
+  ) +
+  scale_color_gradient2(
+    name = "θ",
+    low = "#005F73", mid = "grey60", high = "#AE2012",
+    midpoint = mid_theta,
+    limits = range(d$s_theta, na.rm = TRUE),
+    oob = scales::squish
+  ) +
+  scale_linetype_manual(values = c(name=NULL,"n.s." = "dashed", "p < .05" = "solid")) +                 # hide linetype legend
+  scale_linewidth_manual(values = c("n.s." = 0.2, "p < .05" = 0.5), guide="none") +                # hide linewidth legend
+  facet_wrap(~ outcome, ncol = 2, scales = "free_y") +
+  labs(
+    x = "ω",
+    y = "Trait",
+    title = "Johnson-Neyman Analysis: Trait ~ (ω | θ)"#,
+    #subtitle = "θ coloured blue→white→red; solid+bold where ∂y/∂ω is significant"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(strip.background = element_blank()) +
+  guides(
+  linetype  = guide_legend(title = NULL),
+  linewidth = guide_legend(title = NULL)
+)
+
+
+
+```
+
