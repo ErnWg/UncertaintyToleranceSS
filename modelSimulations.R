@@ -1,25 +1,12 @@
-## End-to-end generative script for parameter recovery.
-##
-## For each generating model in:
-##   Reward, Theta, Omega, ThetaOmega, MotorSticky, BanditSticky
-## we:
-##   - simulate Phase 1 (pure reward learning) + Phase 2 (test w/ stim)
-##   - compute Rmu via Kalman filter with full feedback
-##   - scale Rmu to [0,1], as in the Stan models
-##   - simulate Phase-2 choices using the corresponding generative model:
-##       V = (Rmu - 0.5) [+ theta*smu + omega*ss] [+ stickiness]
-##       smu, ss from Beta counts over stim outcomes (Phase 2)
 
+# Script to simulate data
 library(dplyr)
 library(purrr)
 library(tidyr)
 
 set.seed(1234)
 
-#### ---------------------------------------------------------
-#### 0. Global experiment constants
-#### ---------------------------------------------------------
-
+# Config experiment
 nSub    <- 100          # subjects per dataset
 nRd     <- 4           # rounds (matches your description)
 nT      <- 60          # trials per round (30 Phase 1 + 30 Phase 2)
@@ -33,9 +20,7 @@ sigma_reward <- 2.5    # SD for reward noise
 
 stim_probs_levels <- c(0.15, 0.50, 0.85)
 
-#### ---------------------------------------------------------
-#### 1. Helper: round-wise design (pairs & assignments)
-#### ---------------------------------------------------------
+
 # 6 objects -> all 15 pairs, each 4 times (2x in Phase 1, 2x in Phase 2)
 
 build_round_design <- function() {
@@ -96,10 +81,7 @@ assign_bandit_properties <- function() {
   list(mu_reward = mu_reward, p_stim = p_stim)
 }
 
-#### ---------------------------------------------------------
-#### 2. Kalman filter for rewards (full feedback, as in KFcomplete)
-#### ---------------------------------------------------------
-
+# Kalman filter for rewards (full feedback so both options are updated)
 kalman_full_feedback <- function(nSub, nRd, nT, nB,
                                  opt1, opt2,
                                  rew1, rew2,
@@ -149,10 +131,7 @@ scale_01 <- function(x) {
   x
 }
 
-#### ---------------------------------------------------------
-#### 3. Model feature switches
-#### ---------------------------------------------------------
-
+# Specify Model params to include 
 model_features <- list(
   Reward = list(theta = FALSE, omega = FALSE,
                 motor_sticky = FALSE, bandit_sticky = FALSE),
@@ -173,10 +152,9 @@ has_omega        <- function(m) model_features[[m]]$omega
 has_motor_sticky <- function(m) model_features[[m]]$motor_sticky
 has_bandit_sticky<- function(m) model_features[[m]]$bandit_sticky
 
-#### ---------------------------------------------------------
-#### 4. Hyperparameters & subject-level params (match Stan priors)
-#### ---------------------------------------------------------
 
+# Hyperparameters & subject-level params 
+# Here We just sim one dataset
 sample_hypers <- function(model) {
   feats <- model_features[[model]]
   
@@ -234,10 +212,7 @@ sample_subject_params <- function(model, hypers, nSub) {
   )
 }
 
-#### ---------------------------------------------------------
-#### 5. Beta features for stimulation (Phase 2)
-#### ---------------------------------------------------------
-
+# BLBB specification
 beta_features <- function(a, b, eps = 1e-8) {
   sum_ab <- a + b
   p      <- a / sum_ab
@@ -261,10 +236,8 @@ softmax_2 <- function(logit1, logit2) {
   if (runif(1) < p1) 1L else 2L
 }
 
-#### ---------------------------------------------------------
-#### 6. Simulate one dataset for one generating model
-#### ---------------------------------------------------------
 
+# Simulate one dataset for one generating model
 simulate_dataset <- function(model) {
   
   feats    <- model_features[[model]]
@@ -428,7 +401,7 @@ simulate_dataset <- function(model) {
     }
   }
   
-  # 4) Assemble stan_data (Phase 1 is in arrays but ignored by Stan model)
+  # Assemble stan_data (Phase 1 is in arrays but ignored by Stan model)
   stan_data <- list(
     nSub = nSub,
     nRd  = nRd,
@@ -450,10 +423,7 @@ simulate_dataset <- function(model) {
   )
 }
 
-#### ---------------------------------------------------------
-#### 7. Generate and save datasets per model
-#### ---------------------------------------------------------
-
+#Generate and save datasets per model
 models <- names(model_features)
 n_datasets_per_model <- 1  # adjust as needed
 

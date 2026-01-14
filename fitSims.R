@@ -1,5 +1,3 @@
-## 01_fit_all_models_rstan_safe.R
-
 library(rstan)
 library(loo)
 

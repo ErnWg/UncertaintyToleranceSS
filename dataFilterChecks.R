@@ -1,12 +1,3 @@
-# Experiment Data Pipeline (R) — Stan-aligned with hierarchicalAsymFull_normalized.stan
-# ---------------------------------------------------------------------------------
-# Minimal edits so the data objects match the new Stan data block exactly.
-# - Adds phase2_start
-# - Passes only: opt1/opt2, choice, stim, Rmu, Rsig (no choiceObj)
-# - Keeps reward signals scaled in R; Stan centers Rmu internally
-# - Uses sigma (not variance) for KFcomplete
-# ---------------------------------------------------------------------------------
-
 rm(list = ls())
 options(mc.cores = parallel::detectCores())
 
@@ -19,7 +10,7 @@ files <- list(
   data1 = file.path(getwd(), "data/MainExpData.json")
 )
 
-# Function to process a single file (no drop_na on raw JSON lists)
+
 process_json <- function(filepath) {
   JsonData <- jsonlite::fromJSON(filepath, flatten = FALSE)
   # Extract experiment data
@@ -44,13 +35,13 @@ rawExpData <- files %>%
     )
   )
 
-# Export csv for bonus payment (optional)
+# Export csv for bonus payment 
 bonusPay <- rawExpData %>%
   dplyr::filter(reward > 0) %>%
   dplyr::select(Prolific_ID = ID, Bonus = reward)
 # write.csv(bonusPay, file.path(getwd(), "data", "bonusPay.csv"), row.names = FALSE, quote = FALSE)
 
-# Check for missing questionnaire data (NULL or all NA)
+# Check for missing questionnaire data 
 missingQuestionnaire <- rawExpData %>%
   dplyr::filter(purrr::map_lgl(`SSS-V`, ~ is.null(.) || all(is.na(.))))
 
@@ -260,7 +251,7 @@ prop_best_hvlv <- function(choice_df,
   dplyr::left_join(trial_weighted, eq_rounds, by = keys)
 }
 
-# ---- Phase 1 & 2 performance -> long df ----
+# Phase 1 & 2 performance 
 idx_p1 <- 1:(phase2_start - 1L)
 idx_p2 <- phase2_start:n_trials
 
@@ -283,36 +274,7 @@ pTable <- pTable %>%
 hist(meanPerf_p1)  # Phase-1 performance distribution
 plot(meanPerf_p1, meanPerf_p2) 
 
-# Choice of filter
-#Filter by rewardBias Only
-#idx <- which(rewardChoice$meanHighChoice <= 0.5)
-
-# Get computational varibales
-
-#We now exclude in main script 
-#if (length(idx)) {
-#  ExpData <- ExpData[-idx, ]
-#  keep <- setdiff(seq_len(nSub), idx)
-#  bin.choiceMat  <- bin.choiceMat[keep, , , drop = FALSE]
-#  choiceMat      <- choiceMat[keep, , , drop = FALSE]
-#  opt.left       <- opt.left[keep, , , drop = FALSE]
-#  opt.right      <- opt.right[keep, , , drop = FALSE]
-#  feedback.left  <- feedback.left[keep, , , drop = FALSE]
-#  feedback.right <- feedback.right[keep, , , drop = FALSE]
-#  stim           <- stim[keep, , , drop = FALSE]
-#  scores         <- scores[keep, , , drop = FALSE]
-#  rt             <- rt[keep, , , drop = FALSE]
-#  stimLiking     <- stimLiking[keep, , , , drop = FALSE]
-#  stimValence    <- stimValence[keep, , drop = FALSE]
-#  stimArousal    <- stimArousal[keep, , drop = FALSE]
-##  age            <- age[keep]
-#  gender         <- gender[keep]
-#  familiarity    <- familiarity[keep, , , , drop = FALSE]
-#  perserveration <- perserveration[keep, , , , drop = FALSE]
-#  nSub <- nrow(ExpData)
-#}
-
-# Learning model predictions (R-side; used for saving/diagnostics)
+# Learning model predictions 
 source("BLPreds.R")
 sigma_reward <- sqrt(mean(banditParams$rewardLevel$variance))
 RLearning <- KFcomplete(nSub, nRd, nT, nB, opt.left, opt.right, feedback.left, feedback.right,
@@ -324,9 +286,6 @@ Rmu <- RLearning$Rmu
 Rsig <- RLearning$Rsig
 left.Rmu <- RLearning$left.Rmu
 right.Rmu <- RLearning$right.Rmu
-#Smu <- abind::abind(array(0, dim = c(nSub, nRd, 30, nB)), SLearning$meanBayes, along = 3)
-#Ssig <- abind::abind(array(0, dim = c(nSub, nRd, 30, nB)), SLearning$varBayes,  along = 3) # (R-only)
-#entropy <- abind::abind(array(0, dim = c(nSub, nRd, 30, nB)), SLearning$entropy,  along = 3)
 
 # Scale BL predictions for Stan reward inputs (Smu/Ssig are computed inside Stan)
 scale01 <- function(x){(x - min(x)) / (max(x) - min(x))}
@@ -334,13 +293,12 @@ scaled.Rmu <- scale01(Rmu)
 scaled.Rsig <- scale01(Rsig)
 scaled.Smu <- abind::abind(array(0, dim = c(nSub, nRd, 30, nB)), scale01(SLearning$meanBayes), along = 3)
 scaled.Ssig <- abind::abind(array(0, dim = c(nSub, nRd, 30, nB)), scale01(SLearning$varBayes), along = 3)
-#scaled.Ssig <- scale01(Ssig)
-#scaled.Smu <- scale01(Smu)
+
 
 save(scaled.Rmu,scaled.Rsig,scaled.Smu,scaled.Ssig, file="data/modelPreds.RData")
 
 
-##------- Compute heuristics
+## Compute heuristics
 
 # Familiarity: 1 for bandit chosen at t-1
 banditSticky <- array(0L, dim = c(nSub, nRd, nT, nB))
@@ -417,14 +375,6 @@ write_csv(choice_df, "data/choiceDataRaw.csv")
 saveRDS(choice_df, "data/choiceDataRaw.rds")
 
 
-# Save extracted + Model data (for convenience)
-#save(nSub, nRd, nT, nB,
-#     choiceMat, opt.left, opt.right, feedback.left, feedback.right,
-#     stim, scores, rt, age, gender, stimLiking, stimValence, stimArousal,
-#     scaled.Rmu, scaled.Rsig, scaled.Smu, scaled.Ssig,
-#     bin.choiceMat, familiarity, perserveration,
-#     file = "data/choiceData.RData")
-
 # StanData Objects for fitting (match Stan exactly)
 phase2_start <- 31L
 stim_expanded <- array(99L, dim = c(nSub, nRd, nT))
@@ -442,7 +392,7 @@ stanData <- list(
 
 save(stanData, file = "data/stanData.RData")
 
-# ---- Extract Questionnaire Data ----
+# Extract Questionnaire Data 
 # SSS
 scores.SSS <- scores.SSS.DIS <- scores.SSS.BS <- scores.SSS.TAS <- scores.SSS.ES <- vector()
 # BIS

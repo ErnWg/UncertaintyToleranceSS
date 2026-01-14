@@ -5,15 +5,15 @@ pkgs <- c("rstan", "parallel", "furrr")
 for (p in pkgs) if (!requireNamespace(p, quietly = TRUE)) install.packages(p, dependencies = TRUE)
 lapply(pkgs, library, character.only = TRUE)
 
-# Progress bar for furrr 
+# Progress bar for furrr, chatgpt inspired
 SHOW_OVERALL_PROGRESS <- TRUE
 if (SHOW_OVERALL_PROGRESS) {
   if (!requireNamespace("progressr", quietly = TRUE)) install.packages("progressr")
   library(progressr)
   handlers(global = TRUE)
   # pick one:
-  handlers("txtprogressbar")   # simple base-R bar
-  # handlers("cli")            # fancy cli progress if you use {cli}
+  handlers("txtprogressbar")   
+  # handlers("cli")            
 }
 
 
@@ -24,11 +24,10 @@ Sys.setenv(OMP_NUM_THREADS = "1")
 
 load("data/stanData.RData")                   
 
-# --- Models to fit -----------------------------------------------------------
+# Find models to fit in stanModel folder
 models <- list.files("STANmodels", pattern = "\\.stan$", full.names = TRUE)
 if (length(models) == 0L) stop("No .stan files found in STANmodels/")
 
-# --- Results dir -------------------------------------------------------------
 res_dir <- "results"
 if (!dir.exists(res_dir)) dir.create(res_dir, recursive = TRUE, showWarnings = FALSE)
 
@@ -43,12 +42,12 @@ message(sprintf("Scheduling: %d cores total | cap=%d | chains/fit=%d | concurren
 if (workers > 1L) plan(multisession, workers = workers) else plan(sequential)
 set.seed(29061996)
 
-# --- Progress controls -------------------------------------------------------
+# Progress configs
 SHOW_CHAIN_PROGRESS <- TRUE
-REFRESH_EVERY <- 200        # print every N iters per chain; raise if console feels sluggish
-LOG_TO_FILE   <- TRUE       # also tee progress to per-model logs in results/*.log
+REFRESH_EVERY <- 200        
+LOG_TO_FILE   <- TRUE       
 
-# --- Fit function ------------------------------------------------------------
+# Fit function
 fitModel <- function(model, stanData,
                      chains = CHAINS_DEFAULT,
                      iter = 4000,
@@ -107,7 +106,7 @@ safe_fitModel <- function(model, ...) {
            })
 }
 
-# --- Run (with overall progress bar) ----------------------------------------
+# Run (with progress bar, inspired by chatgpt)
 if (SHOW_OVERALL_PROGRESS) {
   results <- progressr::with_progress({
     p <- progressr::progressor(along = models)
@@ -119,7 +118,7 @@ if (SHOW_OVERALL_PROGRESS) {
                                .options = furrr::furrr_options(seed = TRUE))
 }
 
-# --- Report ------------------------------------------------------------------
+
 errors <- vapply(results, function(x) is.list(x) && !is.null(x$error), logical(1))
 if (any(errors)) {
   cat("\nModels with errors:\n")
