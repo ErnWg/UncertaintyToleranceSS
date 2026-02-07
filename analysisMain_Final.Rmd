@@ -1907,6 +1907,8 @@ library(ggplot2)
 m <- model.TraitInteraction
 car::vif(m)
 
+m <- modelBase.Mixed
+
 alpha <- 0.05
 
 rename_term <- function(x) {
@@ -1928,7 +1930,7 @@ fx <- tidy(m, effects = "fixed", conf.int = TRUE, conf.method = "Wald") %>%
     label = rename_term(term)
   )
 
-fx_keep <- fx #if (any(fx$p_adj < alpha, na.rm = TRUE)) filter(fx, p_adj < alpha) else fx
+fx_keep <- if (any(fx$p_adj < alpha, na.rm = TRUE)) filter(fx, p_adj < alpha) else fx
 
 #fx_keep <- fx %>% filter(term=="dSsig:zBIS")
 
@@ -1973,7 +1975,7 @@ ggplot(fx_plot, aes(x = beta, y = label, colour = sign)) +
   scale_color_manual(values = cols, guide = "none") +
   theme_classic(base_size = 12) +
   labs(title = "Trait-interaction model — fixed effects (β)",
-       x = "Coefficient (β)", y = NULL) +
+       x = "Coefficient (β)", y = NULL) #+
   # cut out the dead space between ~0.8 and ~3.0 (tune these)
   scale_x_break(c(0.2, 3.1), space = 0.2) +
   # optionally also cut the far right tail if needed
@@ -2008,21 +2010,9 @@ ggplot(fx_plot, aes(x = beta, y = label, colour = sign)) +
   labs(title = "Mixed Effects Regression — fixed effects (β)",
        x = "Coefficient (β)", y = NULL) #+
   # cut out the dead space between ~0.8 and ~3.0 (tune these)
-  scale_x_break(c(0.2, 3.1), space = 0.2) +
+  #scale_x_break(c(0.2, 3.1), space = 0.2) +
   # optionally also cut the far right tail if needed
-  scale_x_break(c(-1.5, -0.1), space = 0.2) 
-
-
-library(ggforce)
-
-ggplot(fx_plot, aes(x = beta, y = label, colour = sign)) +
-  geom_errorbar(aes(xmin = lo, xmax = hi), orientation = "y", width = 0.15, linewidth = 1) +
-  geom_point(size = 3) +
-  geom_vline(xintercept = 0, linetype = "dashed") +
-  scale_color_manual(values = cols, guide = "none") +
-  labs(title = "Fixed effects (β)", x = "Coefficient (β)", y = NULL) +
-  theme_classic(base_size = 12) +
-  ggforce::facet_zoom(x = beta > 0.2 & beta < 3.1, horizontal = TRUE)
+  #scale_x_break(c(-1.5, -0.1), space = 0.2) 
 
 
 library(ggplot2)
@@ -2094,15 +2084,6 @@ lvls <- sort(unique(g$group))
 g$group <- factor(g$group, levels = lvls, labels = c("Low", "High"))
 cols <- c("Low" = scales::alpha(col.SSS, 0.25), "High" = col.SSS)
 
-p_Rmu_SS <- ggplot(g, aes(x = x, y = predicted, color = group, fill = group, linetype = group)) +
-  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
-  geom_line(linewidth = 1) +
-  scale_color_manual(values = cols, guide = guide_legend(title = NULL)) +
-  scale_fill_manual(values  = cols, guide = "none") +
-  scale_linetype_manual(values = c("Low" = "dashed", "High" = "solid"), guide = "none") +
-  labs(title = "ΔR\u03bc × SS Interaction", x = "ΔR\u03bc", y = "P(Choice = Right)") +
-  theme_classic(base_size = 12) + theme(legend.position = "top")
-
 p_Rmu_SS <- ggplot(g, aes(x=x,y=predicted,fill="#ee9b00")) +
   geom_ribbon(aes(ymin=conf.low, ymax=conf.high,alpha=group,),color=NA) +
   geom_line(aes(color="#ee9b00",linetype=group),size=1.2) +
@@ -2147,15 +2128,6 @@ lvls <- sort(unique(g$group))
 g$group <- factor(g$group, levels = lvls, labels = c("Low", "High"))
 cols <- c("Low" = scales::alpha(col.SSS, 0.85), "High" = col.SSS)
 
-p_Ssig_SS <- ggplot(g, aes(x = x, y = predicted, color = group, fill = group, linetype = group)) +
-  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
-  geom_line(linewidth = 1) +
-  scale_color_manual(values = cols, guide = guide_legend(title = NULL)) +
-  scale_fill_manual(values  = cols, guide = "none") +
-  scale_linetype_manual(values = c("Low" = "dashed", "High" = "solid"), guide = "none") +
-  labs(title = "ΔStim Uncertainty × SS interaction", x = "ΔStim Uncertainty", y = "P(Choice = Right)") +
-  theme_classic(base_size = 12) + theme(legend.position = "top")
-
 
 p_Ssig_SS <- ggplot(g, aes(x=x,y=predicted,fill="#ee9b00")) +
   geom_ribbon(aes(ymin=conf.low, ymax=conf.high,alpha=group,),color=NA) +
@@ -2177,14 +2149,6 @@ lvls <- sort(unique(g$group))
 g$group <- factor(g$group, levels = lvls, labels = c("Low", "High"))
 cols <- c("Low" = scales::alpha(col.BIS, 0.85), "High" = col.BIS)
 
-p_Ssig_BIS <- ggplot(g, aes(x = x, y = predicted, color = group, fill = group, linetype = group)) +
-  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
-  geom_line(linewidth = 1) +
-  scale_color_manual(values = cols, guide = guide_legend(title = NULL)) +
-  scale_fill_manual(values  = cols, guide = "none") +
-  scale_linetype_manual(values = c("Low" = "dashed", "High" = "solid"), guide = "none") +
-  labs(title = "ΔStim Uncertainty × IP interaction", x = "ΔStim Uncertainty", y = "P(Choice = Right)") +
-  theme_classic(base_size = 12) + theme(legend.position = "top")
 
 p_Ssig_BIS <- ggplot(g, aes(x=x,y=predicted,fill="#0A9396")) +
   geom_ribbon(aes(ymin=conf.low, ymax=conf.high,alpha=group,),color=NA) +
@@ -2207,14 +2171,7 @@ lvls <- sort(unique(g$group))
 g$group <- factor(g$group, levels = lvls, labels = c("Low", "High"))
 cols <- c("Low" = scales::alpha(col.SSS, 0.85), "High" = col.SSS)
 
-p_Motor_SS <- ggplot(g, aes(x = x, y = predicted, color = group, fill = group, linetype = group)) +
-  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
-  geom_line(linewidth = 1) +
-  scale_color_manual(values = cols, guide = guide_legend(title = NULL)) +
-  scale_fill_manual(values  = cols, guide = "none") +
-  scale_linetype_manual(values = c("Low" = "dashed", "High" = "solid"), guide = "none") +
-  labs(title = "Motor stickiness × SS interaction", x = "Motor stickiness", y = "P(Choice = Right)") +
-  theme_classic(base_size = 12) + theme(legend.position = "top")
+
 
 p_Motor_SS <- ggplot(g, aes(x=x,y=predicted,fill="#ee9b00")) +
   geom_ribbon(aes(ymin=conf.low, ymax=conf.high,alpha=group,),color=NA) +
@@ -2234,15 +2191,6 @@ g <- ggpredict(model.TraitInteraction, terms = c("dMotorSticky[all]", bis_terms)
 lvls <- sort(unique(g$group))
 g$group <- factor(g$group, levels = lvls, labels = c("Low", "High"))
 cols <- c("Low" = scales::alpha(col.BIS, 0.85), "High" = col.BIS)
-
-p_Motor_BIS <- ggplot(g, aes(x = x, y = predicted, color = group, fill = group, linetype = group)) +
-  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.15, color = NA) +
-  geom_line(linewidth = 1) +
-  scale_color_manual(values = cols, guide = guide_legend(title = NULL)) +
-  scale_fill_manual(values  = cols, guide = "none") +
-  scale_linetype_manual(values = c("Low" = "dashed", "High" = "solid"), guide = "none") +
-  labs(title = "Motor stickiness × BIS interaction", x = "Motor stickiness", y = "P(Choice = Right)") +
-  theme_classic(base_size = 12) + theme(legend.position = "top")
 
 p_Motor_BIS <- ggplot(g, aes(x=x,y=predicted,fill="#0A9396")) +
   geom_ribbon(aes(ymin=conf.low, ymax=conf.high,alpha=group,),color=NA) +
@@ -2799,7 +2747,7 @@ jn_BIS
 
 ```
 
-# Combined Fanplots
+# Combined JN Fanplots
 Code for Figure 4
 ```{r tmptmp}
 
