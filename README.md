@@ -41,6 +41,7 @@ The main analyses reported in the paper are based on:
 This folder contains the code used to perform computational modeling
 
 * `STANmodels/` contains the various computational models implemented in STAN. 
+* `STANresults/` contains results from STAN model fitting. 
 * `fitModels.R` code to fit experimental data to the models in `STANmodels/`
 * `BLPreds.R` code to generate model predictions that are used for Figure 4A
 
