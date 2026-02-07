@@ -20,7 +20,7 @@ packages <- c('plyr', 'dplyr','tidyverse',  "ggplot2", 'pander', 'emmeans','sjPl
               'ggbeeswarm', 'lmerTest',  'brms', 'BayesFactor', "gridExtra", "lsr",'ggridges','cowplot','entropy','zoo','Hmisc','jsonlite', 
               'DescTools', 'magrittr', 'purrr', 'forcats', 'modelr', 'tidybayes', 'rstan' , 'loo', 'R.matlab','ggpubr','gridExtra','patchwork',
               'ggpubr','ggeffects','psych','viridis','abind','ppcor','CCA','afex','emmeans','sjPlot','scales',"rstatix","MuMIn","performance",
-              'GGally','ggExtra')
+              'GGally','ggExtra','emmeans',"interactions")
 
 invisible(lapply(packages, require, character.only = TRUE))
 
@@ -1135,18 +1135,6 @@ plot.PerfEntropy <- plot_correlation(entropy_by_Sub , "meantotalScore", "entropy
                              title = "Performance ~ Entropy") + 
   labs(x = "Performance", y = "Choice Entropy")
 
-plot.SSSEnt <- plot_correlation(entropy_by_bin , "SSS", "entropy", control_vars = NULL,bins = 6,
-                             method = "pearson",
-                             point_color = "#ee9b00", line_color = "#ee9b00",
-                             title = "SS ~ Entropy") + 
-  labs(x = "SS", y = "Choice Entropy")
-
-plot.BISEnt <- plot_correlation(entropy_by_bin, "BIS", "entropy", control_vars = NULL,bins = 6,
-                             method = "pearson",
-                             point_color = "#0A9396", line_color = "#0A9396",
-                             title = "IP ~ Entropy") + 
-  labs(x = "IP", y = "Mean Reward")
-
 entropy_by_phase <- df.pTable %>%
   group_by(Subject, id, phase) %>%
   summarise(
@@ -1238,6 +1226,18 @@ entropy_by_bin <- pTable_by_bin%>%
   dplyr::mutate(bin = factor(bin, ordered = TRUE, levels=c(1,2,3,4)))
 
 tmp <- lmer(entropy ~ SSS*bin + BIS*bin + (1|id),data=entropy_by_bin)
+
+plot.SSSEnt <- plot_correlation(entropy_by_bin , "SSS", "entropy", control_vars = NULL,bins = 6,
+                             method = "pearson",
+                             point_color = "#ee9b00", line_color = "#ee9b00",
+                             title = "SS ~ Entropy") + 
+  labs(x = "SS", y = "Choice Entropy")
+
+plot.BISEnt <- plot_correlation(entropy_by_bin, "BIS", "entropy", control_vars = NULL,bins = 6,
+                             method = "pearson",
+                             point_color = "#0A9396", line_color = "#0A9396",
+                             title = "IP ~ Entropy") + 
+  labs(x = "IP", y = "Mean Reward")
 
 ggplot(entropy_by_bin, aes(x = SSS_group, y = entropy, fill = SSS_group)) +
   geom_boxplot(outlier.shape = NA, alpha = 0.6) +
@@ -1574,8 +1574,6 @@ tmp <- lm(p_repeat ~ zSSS*zBIS,data = pRepeat_by_sub)
 ```
 
 ## Look at mixed effect regressions 
-
-
 ```{r regression_choice, echo=FALSE}
 library(performance)
 
@@ -1590,10 +1588,6 @@ df.regression <- df.choice %>%
     logRT = log(rt/1000),
     zSSS = scale(SSS),
     zBIS = scale(BIS),
-    #dRmu = scale2_nocenter(dRmu),
-    #dSsig = scale2_nocenter(dSsig),
-    #dSmu = scale2_nocenter(dSmu),
-    #dMotorSticky = scale2_nocenter(dMotorSticky)
   ) %>%
   dplyr::filter(bin.choiceMat > 0) #remove missed trials
 
@@ -1646,12 +1640,6 @@ plot_model(model.TraitInteraction, type = "pred",
            ci.lvl = 0.95, pred.type = "fe")
 
 
-
-# -------- Then I want to plot the psychometric curves
-################################
-
-library(emmeans)
-
 # dRmu slope at SSS×BIS grid
 tr_Rmu <- emtrends(model.TraitInteraction, ~ zSSS * zBIS, var = "dRmu",
                    at = list(zSSS = c(-1,0,1), zBIS = c(-1,0,1)))
@@ -1667,20 +1655,7 @@ pairs(tr_Ssig, by = "zSSS")          # compare BIS levels within SSS
 pairs(tr_Ssig, by = "zBIS")          # compare SSS levels within BIS
 
 
-library(sjPlot)
-
-plot_model(
-  tmp, 
-  type = "pred",
-  terms = c("dSsig[all]", "zSSS", "zBIS")
-)
-
-sjPlot::plot_model(tmp, type = "re")
-
-summary(tmp)
-
-
-## --------------- Plot SS X IP X Ssig  Interaction
+# Plot SS X IP X Ssig  Interaction
 
 
 gSSS <- seq(min(df.regression$zSSS-0.2, na.rm=TRUE),
@@ -1778,9 +1753,6 @@ fig.Ssig_3way <- ggplot(tr_df, aes(zSSS, zBIS)) +
   theme(legend.position = "top")
 
 
-library(dplyr)
-library(ggplot2)
-
 # --- choose contour levels (include 0 explicitly) -----------------------------
 slope_range  <- range(tr_df$slope, na.rm = TRUE)
 slope_breaks <- sort(unique(c(0, pretty(slope_range, n = 5))))
@@ -1854,8 +1826,6 @@ fig.Ssig_3way +
   metR::geom_text_contour(aes(z = slope),
                           breaks = slope_breaks,
                           size = 3, check_overlap = TRUE)
-
-
 
 ## -----------------  Model diagnostics
 
@@ -1935,8 +1905,8 @@ library(ggplot2)
 
 
 m <- model.TraitInteraction
-cat::vif(m)
-m <- modelBase.Mixed
+car::vif(m)
+
 alpha <- 0.05
 
 rename_term <- function(x) {
@@ -2296,14 +2266,14 @@ p_Motor_BIS <- ggplot(g, aes(x=x,y=predicted,fill="#0A9396")) +
 ## Model Based analysis
 ```{r stanPlots}
 # Load model fits from results folder + extract loo-ic
-fits <- list.files("results", pattern = ".stan.fit")
+fits <- list.files("STANresults", pattern = ".stan.fit")
 
 for (fit in 1:length(fits)){
   print(paste("Loading",fits[fit]))
   #Initilise LOOIC and LOOIC.se as empty list
   if (fit <= 1) {LOOIC <- list(); LOOIC.se <-list(); subLOO <- array(NA, dim=c(nSub,length(fits)))}
   #Load model fit from results directory
-  model <- readRDS(paste0("results/", fits[fit]))
+  model <- readRDS(paste0("STANresults/", fits[fit]))
   assign(fits[fit], model)
   
   # Extract fit files and assign dynamically
@@ -2433,12 +2403,12 @@ fig.ModelDelta
 ```{r associations}
 
 models <- list(
-  Reward    = readRDS("results/HBM_Reward.stan.fit.rds"),
-  Theta   = readRDS("results/HBM_Theta.stan.fit.rds"),
-  Omega   = readRDS("results/HBM_Omega.stan.fit.rds"),
-  ThetaOmega  = readRDS("results/HBM_ThetaOmega.stan.fit.rds"),
-  BanditSticky= readRDS("results/HBM_BanditSticky.stan.fit.rds"),
-  MotorSticky= readRDS("results/HBM_MotorSticky.stan.fit.rds")
+  Reward    = readRDS("STANresults/HBM_Reward.stan.fit.rds"),
+  Theta   = readRDS("STANresults/HBM_Theta.stan.fit.rds"),
+  Omega   = readRDS("STANresults/HBM_Omega.stan.fit.rds"),
+  ThetaOmega  = readRDS("STANresults/HBM_ThetaOmega.stan.fit.rds"),
+  BanditSticky= readRDS("STANresults/HBM_BanditSticky.stan.fit.rds"),
+  MotorSticky= readRDS("STANresults/HBM_MotorSticky.stan.fit.rds")
 )
 
 
@@ -2563,7 +2533,8 @@ ggplot(df_long, aes(x = value_plot)) +
 
 ```{r associations}
 library(ggcorrplot)
-winModel <- ex.HBM_MotorSticky.stan.fit.rds
+#winModel <- ex.HBM_MotorSticky.stan.fit.rds
+winModel <- extract(readRDS("STANresults/HBM_MotorSticky.stan.fit.rds"))
 
 df.modelParams <- data.frame(
                              theta=colMeans(winModel$theta),
@@ -2573,14 +2544,7 @@ df.modelParams <- data.frame(
                              tau=1/colMeans(winModel$tau) # change from inverse temperature to temperature
                              
                              ) %>%
-                mutate(log_tau = log(tau),
-                       log_inv_tau = log(inv_tau),
-                       e_omega = scale(omega*tau),
-                       e_theta = scale(theta*tau),
-                       #theta_omega = theta/omega,
-                       #to_sum = abs(theta) + abs(omega),
-                       #diff_theta_omega = theta - omega
-                       ) #change to monotonic due to skeweddistribution
+                mutate(log_tau = log(tau)) 
 
 plot_histograms(df.modelParams,c("theta", "omega", "log_tau","kappa"))
 
@@ -2623,6 +2587,19 @@ ggplot(df.modelParams.long, aes(x = Value)) +
 
 
 df.association <- bind_cols(df.questionnaire, df.modelParams)
+
+df.association <- df.association %>% mutate(
+  s_log_tau=as.numeric(scale(log_tau)), s_tau = as.numeric(scale(tau)),
+  s_omega=as.numeric(scale(omega)),
+  s_theta=as.numeric(scale(theta)),
+  s_kappa=as.numeric(scale(kappa)),
+  s_SSS = as.numeric(scale(SSS)),
+  s_BIS = as.numeric(scale(BIS)),
+  s_IQ = as.numeric(scale(IQ)),
+  s_age = as.numeric(scale(age)),
+  theta_group=ifelse(s_theta >= median(s_theta, na.rm = TRUE), "High", "Low"),
+)
+
 
 
 df_corMat <- df.association %>%
@@ -2754,7 +2731,6 @@ plot_SSS
 form_base_BIS <- s_BIS ~ gender + s_SSS + s_IQ + s_age + s_log_tau + s_omega * s_theta
 form_full_BIS <- s_BIS ~ gender + s_SSS + s_IQ + s_age + s_omega * s_theta * s_log_tau + s_kappa
 
-# --- Fit models --------------------------------------------------------------
 model_base_BIS <- lm(form_base_BIS, data = df_assoc)
 model_full_BIS <- lm(form_full_BIS, data = df_assoc)
 
@@ -2783,7 +2759,7 @@ if (length(gender_terms_BIS)) {
 
 plot_df_BIS <- sjPlot::get_model_data(model_full_BIS, type = "est", terms = plot_terms_BIS) %>%
    dplyr::mutate(
-    term_chr = as.character(term),                   # <-- avoid factor indexing bugs
+    term_chr = as.character(term),                   
     sign     = dplyr::if_else(estimate >= 0, "Positive", "Negative"),
     label    = dplyr::recode(term_chr, !!!label_map_BIS, .default = term_chr)
    )
@@ -2813,92 +2789,25 @@ plot_BIS <- ggplot(plot_df_BIS, aes(y = label, x = estimate, colour = sign)) +
   labs(title = "Predictors of IP",
        x = "Coefficient (\u03B2)", y = "Predictor")
 
+plot_BIS
+
+#JN analysis on interaction 
+jn_SSS <- johnson_neyman(model_full_SSS, pred = s_omega, modx = s_theta, alpha = 0.05, plot = TRUE)
+jn_SSS
+jn_BIS <- johnson_neyman(model_full_BIS, pred = s_omega, modx = s_theta, alpha = 0.05, plot = TRUE)
+jn_BIS
+
 ```
 
-
-```{r omega-theta_fanplots_SS}
-library(dplyr)
-library(tidyr)
-library(ggplot2)
-library(emmeans)
-
-
-n_theta  <- 25
-n_omega  <- 60
-
-g_theta <- seq(min(d$s_theta, na.rm = TRUE), max(d$s_theta, na.rm = TRUE), length.out = n_theta)
-g_omega <- seq(min(d$s_omega, na.rm = TRUE), max(d$s_omega, na.rm = TRUE), length.out = n_omega)
-
-# --- Choose model/outcome (EDIT THESE TWO LINES ONLY) ------------------------
-model       <- model_full_SSS       # or m3_BIS
-outcome_var <- "s_SSS"      # or "s_BIS"
-
-# --- Simple slope of ω across θ at τ = 0 -------------------------------------
-tr <- emtrends(
-  model,
-  specs = ~ s_theta,   # θ is the moderator; condition on τ
-  var   = "s_omega",
-  at    = list(s_theta = g_theta),
-  cov.reduce = mean                   # averages numeric covariates, incl. s_log_tau
-)
-
-tr0 <- summary(tr, infer = TRUE) |> as.data.frame()
-trend_col <- names(tr0)[grepl("\\.trend$", names(tr0))]
-stopifnot(length(trend_col) == 1)
-
-tr_df <- tr0 |>
-  transmute(
-    s_theta,
-    slope   = .data[[trend_col]],
-    p       = p.value,
-    sig     = p < 0.05,
-    sig_lab = ifelse(sig, "p < .05", "n.s.")
-  )
-
-# --- Prediction grid over ω × θ (hold covariates at typical values) ----------
-nd <- expand_grid(s_omega = g_omega, s_theta = g_theta) |>
-  mutate(
-    s_log_tau = mean(d$s_log_tau, na.rm = TRUE),
-    gender = if (is.factor(d$gender)) levels(d$gender)[1] else unique(d$gender)[1],
-    s_SSS  = mean(d$s_SSS, na.rm = TRUE),
-    s_BIS  = mean(d$s_BIS, na.rm = TRUE),
-    s_IQ   = mean(d$s_IQ,  na.rm = TRUE),
-    s_age  = mean(d$s_age, na.rm = TRUE)
-  ) |>
-  left_join(tr_df, by = "s_theta")
-
-nd$yhat <- predict(model, newdata = nd)
-
-# --- Observed points near τ = 0 ----------------------------------------------
-pts <- d |>
-  transmute(s_omega, s_theta, y = .data[[outcome_var]])
-
-# --- Fan plot (θ colour: blue -> red; solid lines where slope is significant) -
-ggplot() +
-  geom_point(data = pts, aes(s_omega, y, color = s_theta),
-             alpha = 1, size = 1.6) +
-  geom_line(data = nd, aes(s_omega, yhat, group = s_theta,
-                           color = s_theta, linetype = sig_lab),
-            linewidth = 0.5) +
-  scale_color_gradient2(
-    name = "θ (moderator)",
-    low = "#005F73", mid = "grey90", high = "#AE2012",
-    limits = range(d$s_theta, na.rm = TRUE),
-    oob = scales::squish
-  )+
-  scale_linetype_manual(values = c("n.s." = "dotted", "p < .05" = "solid"),
-                        name = "Simple slope of ω") +
-  labs(
-    x = "ω",
-    y = paste("Predicted / observed SS"),
-    title = paste0("SS ~ ω across θ")
-  ) +
-  theme_classic(base_size = 12)
-
+# Combined Fanplots
+Code for Figure 4
+```{r tmptmp}
 
 
 
 # Now I want to plot the effect of log_tau on SSS to visualise the partial correlation
+
+d <- df_assoc
 
 x  <- "s_log_tau"                 # predictor
 y  <- "s_SSS"                     # outcome
@@ -2950,7 +2859,7 @@ d_val <- (2 * rho) / sqrt(1 - rho^2)
 p_lbl <- ifelse(pval < .001, "< .001", sprintf("= %.3f", pval))
 sub_txt <- sprintf("ρ = %.3f | p %s | d = %.3f", rho, p_lbl, d_val)
 
-# ---------------------- plot residual–residual (added-variable) ---------------
+
 plot_df <- data.frame(resid_x = drop(resid_x), resid_y = drop(resid_y))
 
 ggplot(plot_df, aes(resid_x, resid_y)) +
@@ -2963,103 +2872,6 @@ ggplot(plot_df, aes(resid_x, resid_y)) +
     x = paste("log τ"),
     y = paste("SS")
   )
-
-
-
-```
-
-
-
-
-```{r omega-theta_fanplots_IP}
-library(dplyr)
-library(tidyr)
-library(ggplot2)
-library(emmeans)
-
-
-n_theta  <- 20
-n_omega  <- 60
-
-g_theta <- seq(min(d$s_theta, na.rm = TRUE), max(d$s_theta, na.rm = TRUE), length.out = n_theta)
-g_omega <- seq(min(d$s_omega, na.rm = TRUE), max(d$s_omega, na.rm = TRUE), length.out = n_omega)
-
-# --- Choose model/outcome (EDIT THESE TWO LINES ONLY) ------------------------
-model       <- model_full_BIS       # or m3_BIS
-outcome_var <- "s_BIS"      # or "s_BIS"
-
-# --- Simple slope of ω across θ at τ = 0 -------------------------------------
-tr <- emtrends(
-  model,
-  specs = ~ s_theta,   # θ is the moderator; condition on τ
-  var   = "s_omega",
-  at    = list(s_theta = g_theta),
-  cov.reduce = mean                   # averages numeric covariates, incl. s_log_tau
-)
-
-tr0 <- summary(tr, infer = TRUE) |> as.data.frame()
-trend_col <- names(tr0)[grepl("\\.trend$", names(tr0))]
-stopifnot(length(trend_col) == 1)
-
-tr_df <- tr0 |>
-  transmute(
-    s_theta,
-    slope   = .data[[trend_col]],
-    p       = p.value,
-    sig     = p < 0.05,
-    sig_lab = ifelse(sig, "p < .05", "n.s.")
-  )
-
-# --- Prediction grid over ω × θ (hold covariates at typical values) ----------
-nd <- expand_grid(s_omega = g_omega, s_theta = g_theta) |>
-  mutate(
-    s_log_tau = mean(d$s_log_tau, na.rm = TRUE),
-    gender = if (is.factor(d$gender)) levels(d$gender)[1] else unique(d$gender)[1],
-    s_SSS  = mean(d$s_SSS, na.rm = TRUE),
-    s_BIS  = mean(d$s_BIS, na.rm = TRUE),
-    s_IQ   = mean(d$s_IQ,  na.rm = TRUE),
-    s_age  = mean(d$s_age, na.rm = TRUE)
-  ) |>
-  left_join(tr_df, by = "s_theta")
-
-nd$yhat <- predict(model, newdata = nd)
-
-# --- Observed points near τ = 0 ----------------------------------------------
-pts <- d |>
-  transmute(s_omega, s_theta, y = .data[[outcome_var]])
-
-# --- Fan plot (θ colour: blue -> red; solid lines where slope is significant) -
-ggplot() +
-  geom_point(data = pts, aes(s_omega, y, color = s_theta),
-             alpha = 1, size = 1.6) +
-  geom_line(data = nd, aes(s_omega, yhat, group = s_theta,
-                           color = s_theta, linetype = sig_lab),
-            linewidth = 0.5) +
-  scale_color_gradient2(
-    name = "θ",
-    low = "#005F73", mid = "grey90", high = "#AE2012",
-    limits = range(d$s_theta, na.rm = TRUE),
-    oob = scales::squish
-  )+
-  scale_linetype_manual(values = c("n.s." = "dashed", "p < .05" = "solid"),
-                        name = "Simple slope of ω", guide="none") +
-  labs(
-    x = "ω",
-    y = paste("Predicted / observed IP"),
-    title = paste0("IP ~ ω across θ (moderator)")
-  ) +
-  theme_classic(base_size = 12)
-
-#"#E9D8A6","#E9D8A6","#E9D8A6",
-#low = "#005F73", mid = "grey90", high = "#AE2012",
-
-```
-
-# Combined Fanplots
-Code for Figure 4
-```{r tmptmp}
-
-library(emmeans)
 
 n_theta  <- 20
 n_omega  <- 60
@@ -3089,6 +2901,7 @@ tr_df_SSS <- tr0_SSS |>
 nd_SSS <- expand_grid(s_omega = g_omega, s_theta = g_theta) |>
   mutate(
     s_log_tau = mean(d$s_log_tau, na.rm = TRUE),
+    s_kappa = mean(d$s_kappa, na.rm = TRUE),
     gender = if (is.factor(d$gender)) levels(d$gender)[1] else unique(d$gender)[1],
     s_SSS  = mean(d$s_SSS, na.rm = TRUE),
     s_BIS  = mean(d$s_BIS, na.rm = TRUE),
@@ -3125,6 +2938,7 @@ tr_df_BIS <- tr0_BIS |>
 nd_BIS <- expand_grid(s_omega = g_omega, s_theta = g_theta) |>
   mutate(
     s_log_tau = mean(d$s_log_tau, na.rm = TRUE),
+    s_kappa = mean(d$s_kappa, na.rm = TRUE),
     gender = if (is.factor(d$gender)) levels(d$gender)[1] else unique(d$gender)[1],
     s_SSS  = mean(d$s_SSS, na.rm = TRUE),
     s_BIS  = mean(d$s_BIS, na.rm = TRUE),
@@ -3187,4 +3001,5 @@ ggplot() +
 
 
 ```
+
 
